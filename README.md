@@ -56,6 +56,35 @@ with UnifiedSafetensorsLoader("model.safetensors", low_memory=True) as loader:
         print(f"Decoded {key}:", extracted_dict)
 ```
 
+### Optimized Asynchronous Streaming via ThreadPoolExecutor
+
+For maximum I/O throughput while maintaining strict memory backpressure, use `async_stream`. This utilizes a `ThreadPoolExecutor` for background disk reading and a bounded queue to prevent memory exhaustion. By setting `pin_memory=True`, memory pinning is performed sequentially in the main thread to avoid OS-level lock contention and preserve high DMA transfer speeds.
+
+```python
+from unifiedefficientloader import UnifiedSafetensorsLoader, transfer_to_gpu_pinned
+
+with UnifiedSafetensorsLoader("model.safetensors", low_memory=True) as loader:
+    keys_to_load = loader.keys()
+    
+    # Create the continuous streaming generator
+    # prefetch_batches controls how many batches to buffer in memory
+    stream = loader.async_stream(
+        keys_to_load, 
+        batch_size=8, 
+        prefetch_batches=2, 
+        pin_memory=True
+    )
+    
+    # Iterate directly over the generator
+    for batch in stream:
+        for key, pinned_tensor in batch:
+            # Transfer directly to GPU via DMA (pinning is already done)
+            gpu_tensor = transfer_to_gpu_pinned(pinned_tensor, device="cuda")
+            
+            # ... process gpu_tensor ...
+            loader.mark_processed(key)
+```
+
 ### Tensor/Dict Conversion
 
 ```python

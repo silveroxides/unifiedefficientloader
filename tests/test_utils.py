@@ -3,6 +3,7 @@ import os
 import tempfile
 import json
 import torch
+import warnings
 from safetensors.torch import save_file
 from unifiedefficientloader import (
     UnifiedSafetensorsLoader,
@@ -12,6 +13,9 @@ from unifiedefficientloader import (
     get_pinned_transfer_stats,
     reset_pinned_transfer_stats
 )
+
+# Silence internal PyTorch dataloader deprecation warnings
+warnings.filterwarnings("ignore", message=".*The argument 'device' of Tensor.*")
 
 @pytest.fixture(scope="module")
 def sample_safetensors_file():
@@ -107,3 +111,27 @@ def test_pinned_transfer_with_loaded_tensors(sample_safetensors_file):
             stats = get_pinned_transfer_stats()
             assert stats["pinned"] == 1
             assert stats["fallback"] == 0
+
+def test_async_stream_loading(sample_safetensors_file):
+    filepath, original_tensors, _ = sample_safetensors_file
+    
+    with UnifiedSafetensorsLoader(filepath, low_memory=True) as loader:
+        keys_to_load = list(original_tensors.keys())
+        # Use async_stream directly with pin_memory=True
+        stream = loader.async_stream(keys_to_load, batch_size=2, pin_memory=True if torch.cuda.is_available() else False)
+        
+        loaded_count = 0
+        
+        for batch in stream:
+            for k, tensor in batch:
+                assert k in original_tensors
+                # Ensure the loaded tensor matches the original
+                assert torch.equal(tensor, original_tensors[k])
+                
+                # Verify that it is properly pinned if requested and CUDA is available
+                if torch.cuda.is_available():
+                    assert tensor.is_pinned()
+                    
+                loaded_count += 1
+                
+        assert loaded_count == len(keys_to_load)

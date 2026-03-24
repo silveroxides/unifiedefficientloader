@@ -27,6 +27,11 @@ def _ensure_safetensors():
     except ImportError:
         raise ImportError("The 'safetensors' package is required but not installed. Please install it.")
 
+try:
+    import torch
+except ImportError:
+    pass
+
 class UnifiedSafetensorsLoader:
     """Unified safetensors loader supporting both preload and streaming modes.
 
@@ -66,9 +71,9 @@ class UnifiedSafetensorsLoader:
         self._metadata: Dict[str, str] = {}
 
         if low_memory:
-            # Streaming mode: read header only, keep file open
+            # Streaming mode: read header only
             self._header, self._header_size = self._read_header()
-            self._file = open(filename, "rb")
+            self._file = None # Opened lazily to support multiprocessing DataLoader
             self._all_keys = [k for k in self._header.keys() if k != "__metadata__"]
             # Extract metadata from header (safetensors stores it under __metadata__ key)
             self._metadata = self._header.get("__metadata__", {})
@@ -94,6 +99,15 @@ class UnifiedSafetensorsLoader:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
+
+    def __getstate__(self):
+        """Make loader picklable for multiprocessing DataLoaders."""
+        state = self.__dict__.copy()
+        state['_file'] = None
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
 
     def close(self):
         """Close file handle and release resources."""
@@ -140,6 +154,9 @@ class UnifiedSafetensorsLoader:
         # Low-memory mode: load on-demand
         if key not in self._header:
             raise KeyError(f"Tensor '{key}' not found in file")
+
+        if self._file is None:
+            self._file = open(self.filename, "rb")
 
         metadata = self._header[key]
         offset_start, offset_end = metadata["data_offsets"]
@@ -227,6 +244,118 @@ class UnifiedSafetensorsLoader:
         else:
             raise ValueError(f"Unsupported float8 type: {dtype_str}")
 
+    def async_stream(self, keys: list, batch_size: int = 1, prefetch_batches: int = 2, pin_memory: bool = False):
+        """Asynchronously stream tensors from disk.
+        
+        Args:
+            keys: List of tensor keys to load
+            batch_size: Number of tensors to yield in each batch
+            prefetch_batches: Number of batches to pre-fetch in background
+            pin_memory: If True, tensors will be pinned in CPU memory (sequentially in main thread)
+            
+        Yields:
+            List of (key, tensor) tuples
+        """
+        import threading
+        import queue
+        from concurrent.futures import ThreadPoolExecutor
+
+        torch = _ensure_torch()
+        thread_local = threading.local()
+
+        def get_file_handle():
+            if not hasattr(thread_local, 'file'):
+                thread_local.file = open(self.filename, "rb")
+            return thread_local.file
+
+        def _worker_load(key):
+            try:
+                # Direct thread-safe read
+                metadata = self._header[key]
+                offset_start, offset_end = metadata["data_offsets"]
+                if offset_start != offset_end:
+                    f = get_file_handle()
+                    f.seek(self._header_size + 8 + offset_start)
+                    tensor_bytes = bytearray(offset_end - offset_start)
+                    f.readinto(tensor_bytes)
+                else:
+                    tensor_bytes = None
+
+                tensor = self._deserialize_tensor(tensor_bytes, metadata)
+                return key, tensor, None
+            except Exception as e:
+                # Fallback info for main thread
+                return key, None, e
+
+        # Queue for individual (key, tensor) pairs
+        # Size it to hold enough for prefetch_batches
+        q = queue.Queue(maxsize=prefetch_batches * batch_size)
+        
+        def _producer():
+            # Use a reasonable number of workers for I/O bound tasks
+            max_workers = min(16, max(4, batch_size))
+            # Limit task submission to maintain backpressure on memory
+            max_in_flight = max(max_workers, prefetch_batches * batch_size)
+            
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = []
+                key_iter = iter(keys)
+                
+                # Fill the pipeline
+                for _ in range(max_in_flight):
+                    try:
+                        k = next(key_iter)
+                        futures.append(executor.submit(_worker_load, k))
+                    except StopIteration:
+                        break
+                
+                while futures:
+                    # Maintain order by taking the first future
+                    f = futures.pop(0)
+                    result = f.result() # Blocks until this specific tensor is loaded
+                    q.put(result)       # Blocks if the consumption queue is full
+                    
+                    # Submit next task if available
+                    try:
+                        k = next(key_iter)
+                        futures.append(executor.submit(_worker_load, k))
+                    except StopIteration:
+                        pass
+                        
+            q.put(None) # Sentinel
+
+        producer_thread = threading.Thread(target=_producer, daemon=True)
+        producer_thread.start()
+
+        batch = []
+        while True:
+            res = q.get()
+            if res is None:
+                if batch:
+                    yield batch
+                break
+            
+            k, t, err = res
+            if err is not None:
+                logger.warning(f"Async load failed for {k}, falling back to sync: {err}")
+                # Fallback synchronous load
+                try:
+                    t = self.get_tensor(k)
+                except Exception as sync_err:
+                    logger.error(f"Sync fallback also failed for {k}: {sync_err}")
+                    raise sync_err
+            
+            # Pin memory sequentially in the main thread to avoid OS-level lock contention
+            if pin_memory and t.device.type == 'cpu':
+                try:
+                    t = t.pin_memory()
+                except Exception as e:
+                    logger.warning(f"Failed to pin memory for {k}: {e}")
+            
+            batch.append((k, t))
+            if len(batch) == batch_size:
+                yield batch
+                batch = []
 
 # Backward compatibility alias
 MemoryEfficientSafeOpen = UnifiedSafetensorsLoader
