@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unifiedefficientloader"
+version = "0.1.0"
+description = "A unified interface for memory efficient per tensor loading of safetensors files as raw bytes from offset, handling CPU/GPU pinned transfers, and converting between tensors and dicts."
+readme = "README.md"
+authors = [
+  { name="silveroxides" }
+]
+license = { text="MIT" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+requires-python = ">=3.8"
+
+[project.optional-dependencies]
+torch = ["torch"]
+safetensors = ["safetensors"]
+tqdm = ["tqdm"]
+all = ["torch", "safetensors", "tqdm"]
+
+[tool.pytest.ini_options]
+log_cli = true
+log_cli_level = "DEBUG"
+log_cli_format = "%(asctime)s [%(levelname)8s] %(message)s (%(filename)s:%(lineno)s)"
+log_cli_date_format = "%Y-%m-%d %H:%M:%S"
