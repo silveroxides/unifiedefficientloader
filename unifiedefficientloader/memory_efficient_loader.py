@@ -244,6 +244,30 @@ class UnifiedSafetensorsLoader:
         else:
             raise ValueError(f"Unsupported float8 type: {dtype_str}")
 
+
+    def load_all(self):
+        """Load all tensors as a dictionary.
+
+        In low-memory mode: uses async_stream for parallel multi-threaded I/O.
+        In standard mode: returns the preloaded tensor cache.
+
+        Returns:
+            Dict[str, torch.Tensor]: All tensors keyed by name.
+        """
+        if not self.low_memory:
+            return dict(self._tensors)
+
+        sd = {}
+        for batch in self.async_stream(
+            keys=self._all_keys,
+            batch_size=16,
+            prefetch_batches=2,
+            pin_memory=False,
+        ):
+            for key, tensor in batch:
+                sd[key] = tensor
+        return sd
+
     def async_stream(self, keys: list, batch_size: int = 1, prefetch_batches: int = 2, pin_memory: bool = False):
         """Asynchronously stream tensors from disk.
         
