@@ -4,10 +4,11 @@ Pinned memory utilities for faster CPU→GPU tensor transfers.
 Pinned (page-locked) memory enables faster DMA transfers to GPU.
 Uses PyTorch's native pin_memory() with non_blocking transfers.
 """
-import logging
 from typing import Optional
 
-logger = logging.getLogger(__name__)
+from . import logging_utils
+
+logger = logging_utils.get_logger(__name__)
 
 def _ensure_torch():
     try:
@@ -21,9 +22,14 @@ _verbose = False
 _pinned_transfer_stats = {"pinned": 0, "fallback": 0}
 
 def set_verbose(enabled: bool):
-    """Enable/disable verbose output for pinned transfers."""
+    """
+    Enable/disable verbose output for pinned transfers.
+    Also adjusts logging level to VERBOSE if enabled.
+    """
     global _verbose
     _verbose = enabled
+    if enabled:
+        logging_utils.setup_logging("VERBOSE")
 
 def get_pinned_transfer_stats():
     """Return pinned transfer statistics for verification."""
@@ -34,6 +40,7 @@ def reset_pinned_transfer_stats():
     global _pinned_transfer_stats
     _pinned_transfer_stats = {"pinned": 0, "fallback": 0}
 
+@logging_utils.log_debug
 def transfer_to_gpu_pinned(
     tensor,
     device: str = 'cuda',
@@ -67,22 +74,25 @@ def transfer_to_gpu_pinned(
 
         # One-time confirmation on first success
         if _pinned_transfer_stats["pinned"] == 0:
-            logger.debug("[pinned_transfer] Pinned memory active - faster GPU transfers enabled")
+            logging_utils.verbose("[pinned_transfer] Pinned memory active - faster GPU transfers enabled")
 
         _pinned_transfer_stats["pinned"] += 1
+
+        msg = f"[pinned_transfer] Pinned: {tensor.shape} ({tensor.numel() * tensor.element_size() / 1024:.1f} KB)"
         if _verbose:
-            logger.debug(f"[pinned_transfer] Pinned: {tensor.shape} ({tensor.numel() * tensor.element_size() / 1024:.1f} KB)")
+            logging_utils.normal(msg)
         else:
-            logger.debug(f"[pinned_transfer] Transferred tensor {tensor.shape} to {device} via pinned memory")
+            logging_utils.verbose(msg)
 
         return result
 
     except Exception as e:
         _pinned_transfer_stats["fallback"] += 1
+        msg = f"[pinned_transfer] Fallback transfer to {device} due to error: {e}"
         if _verbose:
-            logger.debug(f"[pinned_transfer] Fallback: {e}")
+            logging_utils.warning(msg)
         else:
-            logger.debug(f"[pinned_transfer] Fallback transfer to {device} due to error: {e}")
+            logging_utils.verbose(msg)
 
         if dtype is not None:
             return tensor.to(device=device, dtype=dtype)

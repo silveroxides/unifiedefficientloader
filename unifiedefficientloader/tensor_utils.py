@@ -5,10 +5,11 @@ Provides serialization helpers for dictionary/tensor conversion.
 Requires `torch`.
 """
 import json
-import logging
 from typing import Dict, Tuple
 
-logger = logging.getLogger(__name__)
+from . import logging_utils
+
+logger = logging_utils.get_logger(__name__)
 
 def _ensure_torch():
     try:
@@ -18,6 +19,7 @@ def _ensure_torch():
         raise ImportError("The 'torch' package is required but not installed. Please install it.")
 
 
+@logging_utils.log_debug
 def dict_to_tensor(data_dict: dict):
     """
     Convert a dictionary to a torch.uint8 tensor containing JSON bytes.
@@ -32,9 +34,10 @@ def dict_to_tensor(data_dict: dict):
     json_str = json.dumps(data_dict)
     byte_data = json_str.encode("utf-8")
     tensor_data = torch.tensor(list(byte_data), dtype=torch.uint8)
-    logger.debug(f"dict_to_tensor: serialized dict to uint8 tensor of shape {tensor_data.shape}")
+    logging_utils.debug(f"dict_to_tensor: serialized dict to uint8 tensor of shape {tensor_data.shape}")
     return tensor_data
 
+@logging_utils.log_debug
 def tensor_to_dict(tensor_data) -> dict:
     """
     Convert a torch.uint8 tensor containing JSON bytes to a dictionary.
@@ -50,5 +53,5 @@ def tensor_to_dict(tensor_data) -> dict:
     byte_data = bytes(tensor_data.tolist())
     json_str = byte_data.decode("utf-8")
     data_dict = json.loads(json_str)
-    logger.debug(f"tensor_to_dict: deserialized tensor of shape {tensor_data.shape} to dict with keys: {list(data_dict.keys())}")
+    logging_utils.debug(f"tensor_to_dict: deserialized tensor of shape {tensor_data.shape} to dict with keys: {list(data_dict.keys())}")
     return data_dict

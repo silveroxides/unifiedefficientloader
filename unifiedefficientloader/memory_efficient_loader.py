@@ -7,10 +7,11 @@ Requires `torch`, `safetensors`, and optionally `tqdm`.
 import gc
 import json
 import struct
-import logging
 from typing import Dict, Optional, Tuple
 
-logger = logging.getLogger(__name__)
+from . import logging_utils
+
+logger = logging_utils.get_logger(__name__)
 
 def _ensure_torch():
     try:
@@ -51,6 +52,7 @@ class UnifiedSafetensorsLoader:
                 loader.mark_processed(key)  # Frees memory in low_memory mode
     """
 
+    @logging_utils.log_debug
     def __init__(self, filename: str, low_memory: bool = False):
         """Initialize the loader.
 
@@ -60,7 +62,7 @@ class UnifiedSafetensorsLoader:
         """
         torch = _ensure_torch()
         safe_open = _ensure_safetensors()
-        
+
         self.filename = filename
         self.low_memory = low_memory
         self._tensors: Dict[str, 'torch.Tensor'] = {}
@@ -77,20 +79,20 @@ class UnifiedSafetensorsLoader:
             self._all_keys = [k for k in self._header.keys() if k != "__metadata__"]
             # Extract metadata from header (safetensors stores it under __metadata__ key)
             self._metadata = self._header.get("__metadata__", {})
-            logger.debug(f"Initialized Low-memory mode: parsed header of size {self._header_size} bytes.")
-            logger.debug(f"Found {len(self._all_keys)} tensors (streaming mode)")
+            logging_utils.verbose(f"Initialized Low-memory mode: parsed header of size {self._header_size} bytes.")
+            logging_utils.verbose(f"Found {len(self._all_keys)} tensors (streaming mode)")
         else:
             # Standard mode: preload all tensors
             with safe_open(filename, framework="pt", device="cpu") as f:
                 self._metadata = f.metadata() or {}
                 self._all_keys = list(f.keys())
-                print(f"Loading {len(self._all_keys)} tensors from source file...")
+                logging_utils.normal(f"Loading {len(self._all_keys)} tensors from source file...")
                 try:
                     from tqdm import tqdm
-                    iterator = tqdm(self._all_keys, desc="Loading tensors")
+                    iterator = tqdm(self._all_keys, desc="Loading tensors", disable=not logger.isEnabledFor(logging_utils.NORMAL_LEVEL))
                 except ImportError:
                     iterator = self._all_keys
-                
+
                 for key in iterator:
                     self._tensors[key] = f.get_tensor(key)
 
@@ -141,6 +143,7 @@ class UnifiedSafetensorsLoader:
         """Get tensor ndim without loading tensor data."""
         return len(self.get_shape(key))
 
+    @logging_utils.log_debug
     def get_tensor(self, key: str) -> 'torch.Tensor':
         """Get a tensor by key.
 
@@ -162,7 +165,7 @@ class UnifiedSafetensorsLoader:
         offset_start, offset_end = metadata["data_offsets"]
 
         if offset_start != offset_end:
-            logger.debug(f"Loading tensor '{key}' from offset {offset_start} to {offset_end} ({(offset_end - offset_start)} bytes)")
+            logging_utils.debug(f"Loading tensor '{key}' from offset {offset_start} to {offset_end} ({(offset_end - offset_start)} bytes)")
             self._file.seek(self._header_size + 8 + offset_start)
             # Use bytearray to create a writable buffer, avoiding PyTorch warning
             # about non-writable tensors from read-only bytes.
@@ -270,13 +273,13 @@ class UnifiedSafetensorsLoader:
 
     def async_stream(self, keys: list, batch_size: int = 1, prefetch_batches: int = 2, pin_memory: bool = False):
         """Asynchronously stream tensors from disk.
-        
+
         Args:
             keys: List of tensor keys to load
             batch_size: Number of tensors to yield in each batch
             prefetch_batches: Number of batches to pre-fetch in background
             pin_memory: If True, tensors will be pinned in CPU memory (sequentially in main thread)
-            
+
         Yields:
             List of (key, tensor) tuples
         """
@@ -314,17 +317,17 @@ class UnifiedSafetensorsLoader:
         # Queue for individual (key, tensor) pairs
         # Size it to hold enough for prefetch_batches
         q = queue.Queue(maxsize=prefetch_batches * batch_size)
-        
+
         def _producer():
             # Use a reasonable number of workers for I/O bound tasks
             max_workers = min(16, max(4, batch_size))
             # Limit task submission to maintain backpressure on memory
             max_in_flight = max(max_workers, prefetch_batches * batch_size)
-            
+
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = []
                 key_iter = iter(keys)
-                
+
                 # Fill the pipeline
                 for _ in range(max_in_flight):
                     try:
@@ -332,20 +335,20 @@ class UnifiedSafetensorsLoader:
                         futures.append(executor.submit(_worker_load, k))
                     except StopIteration:
                         break
-                
+
                 while futures:
                     # Maintain order by taking the first future
                     f = futures.pop(0)
                     result = f.result() # Blocks until this specific tensor is loaded
                     q.put(result)       # Blocks if the consumption queue is full
-                    
+
                     # Submit next task if available
                     try:
                         k = next(key_iter)
                         futures.append(executor.submit(_worker_load, k))
                     except StopIteration:
                         pass
-                        
+
             q.put(None) # Sentinel
 
         producer_thread = threading.Thread(target=_producer, daemon=True)
@@ -358,24 +361,24 @@ class UnifiedSafetensorsLoader:
                 if batch:
                     yield batch
                 break
-            
+
             k, t, err = res
             if err is not None:
-                logger.warning(f"Async load failed for {k}, falling back to sync: {err}")
+                logging_utils.warning(f"Async load failed for {k}, falling back to sync: {err}")
                 # Fallback synchronous load
                 try:
                     t = self.get_tensor(k)
                 except Exception as sync_err:
-                    logger.error(f"Sync fallback also failed for {k}: {sync_err}")
+                    logging_utils.error(f"Sync fallback also failed for {k}: {sync_err}")
                     raise sync_err
-            
+
             # Pin memory sequentially in the main thread to avoid OS-level lock contention
             if pin_memory and t.device.type == 'cpu':
                 try:
                     t = t.pin_memory()
                 except Exception as e:
-                    logger.warning(f"Failed to pin memory for {k}: {e}")
-            
+                    logging_utils.warning(f"Failed to pin memory for {k}: {e}")
+
             batch.append((k, t))
             if len(batch) == batch_size:
                 yield batch
