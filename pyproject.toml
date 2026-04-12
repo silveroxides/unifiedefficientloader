@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unifiedefficientloader"
-version = "0.2.1"
+version = "0.2.2"
 description = "A unified interface for memory efficient per tensor loading of safetensors files as raw bytes from offset, handling CPU/GPU pinned transfers, and converting between tensors and dicts."
 readme = "README.md"
 authors = [
