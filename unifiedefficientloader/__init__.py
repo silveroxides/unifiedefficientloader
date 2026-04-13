@@ -9,7 +9,7 @@ def check_dependencies(*packages):
     for pkg in packages:
         if importlib.util.find_spec(pkg) is None:
             missing.append(pkg)
-    
+
     if missing:
         missing_str = ", ".join(missing)
         raise ImportError(
@@ -25,9 +25,9 @@ from .tensor_utils import dict_to_tensor, tensor_to_dict
 from .pinned_transfer import transfer_to_gpu_pinned, set_verbose, get_pinned_transfer_stats, reset_pinned_transfer_stats
 from .logging_utils import (
     setup_logging,
-    MINIMAL_LEVEL, 
-    NORMAL_LEVEL, 
-    VERBOSE_LEVEL, 
+    MINIMAL_LEVEL,
+    NORMAL_LEVEL,
+    VERBOSE_LEVEL,
     DEBUG_LEVEL,
     debug,
     verbose,

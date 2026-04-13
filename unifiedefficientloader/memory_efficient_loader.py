@@ -53,18 +53,24 @@ class UnifiedSafetensorsLoader:
     """
 
     @logging_utils.log_debug
-    def __init__(self, filename: str, low_memory: bool = False):
+    def __init__(self, filename: str, low_memory: bool = False, direct_gpu: bool = False):
         """Initialize the loader.
 
         Args:
             filename: Path to safetensors file
             low_memory: If True, use streaming mode; if False, preload all tensors
+            direct_gpu: If True, stream directly to GPU pinned/slab memory (requires low_memory=True)
         """
         torch = _ensure_torch()
         safe_open = _ensure_safetensors()
 
         self.filename = filename
         self.low_memory = low_memory
+        self.direct_gpu = direct_gpu
+
+        if direct_gpu and not low_memory:
+            logging_utils.warning("direct_gpu=True requires low_memory=True. Forcing low_memory=True.")
+            self.low_memory = True
         self._tensors: Dict[str, 'torch.Tensor'] = {}
         self._all_keys = []
         self._file = None
@@ -266,12 +272,13 @@ class UnifiedSafetensorsLoader:
             batch_size=16,
             prefetch_batches=2,
             pin_memory=False,
+            direct_gpu=self.direct_gpu,
         ):
             for key, tensor in batch:
                 sd[key] = tensor
         return sd
 
-    def async_stream(self, keys: list, batch_size: int = 1, prefetch_batches: int = 2, pin_memory: bool = False):
+    def async_stream(self, keys: list, batch_size: int = 1, prefetch_batches: int = 2, pin_memory: bool = False, direct_gpu: bool = False):
         """Asynchronously stream tensors from disk.
 
         Args:
@@ -279,6 +286,7 @@ class UnifiedSafetensorsLoader:
             batch_size: Number of tensors to yield in each batch
             prefetch_batches: Number of batches to pre-fetch in background
             pin_memory: If True, tensors will be pinned in CPU memory (sequentially in main thread)
+            direct_gpu: Stream via pinned buffer directly to GPU
 
         Yields:
             List of (key, tensor) tuples
@@ -286,9 +294,50 @@ class UnifiedSafetensorsLoader:
         import threading
         import queue
         from concurrent.futures import ThreadPoolExecutor
+        import os
 
         torch = _ensure_torch()
         thread_local = threading.local()
+
+        # Initialize GPU slab and Pinned Buffer Pool if direct_gpu
+        gpu_slab = None
+        pinned_pool = None
+        cuda_stream = None
+
+        if direct_gpu and torch.cuda.is_available():
+            try:
+                from .gpu_slab_allocator import GpuSlabAllocator
+                from .pinned_buffer_pool import PinnedBufferPool
+
+                # Pre-calculate required slab size
+                total_bytes = 0
+                max_tensor_bytes = 0
+                for k in keys:
+                    meta = self._header[k]
+                    start, end = meta["data_offsets"]
+                    sz = end - start
+                    # Align each size for accurate total (match GpuSlabAllocator behavior)
+                    align = 256
+                    aligned_sz = (sz + align - 1) // align * align
+                    total_bytes += aligned_sz
+                    max_tensor_bytes = max(max_tensor_bytes, sz)
+
+                # Add 5% padding for safety
+                slab_size = int(total_bytes * 1.05)
+                gpu_slab = GpuSlabAllocator(slab_size)
+
+                # Initialize pinned buffer pool (size of largest tensor)
+                num_buffers = prefetch_batches * batch_size + 1
+                pinned_pool = PinnedBufferPool(max_tensor_bytes, num_buffers)
+                cuda_stream = torch.cuda.Stream()
+
+                logging_utils.normal(f"Direct GPU pipeline initialized: Slab {slab_size / (1024**2):.1f}MB, Pool max_size {max_tensor_bytes / (1024**2):.1f}MB")
+
+            except Exception as e:
+                logging_utils.warning(f"Failed to initialize direct GPU pipeline: {e}. Falling back.")
+                direct_gpu = False
+                gpu_slab = None
+                pinned_pool = None
 
         def get_file_handle():
             if not hasattr(thread_local, 'file'):
@@ -297,22 +346,54 @@ class UnifiedSafetensorsLoader:
 
         def _worker_load(key):
             try:
-                # Direct thread-safe read
                 metadata = self._header[key]
                 offset_start, offset_end = metadata["data_offsets"]
-                if offset_start != offset_end:
+                sz = offset_end - offset_start
+
+                if direct_gpu and sz > 0:
+                    # Direct GPU Pipeline Path
+                    buf_idx, pinned_buf = pinned_pool.acquire()
+
+                    # Read into pinned memory via bytearray view
+                    view = pinned_buf[:sz]
+                    # Convert to bytearray for os.readinto or file.readinto
+                    arr = bytearray(sz)
+
                     f = get_file_handle()
                     f.seek(self._header_size + 8 + offset_start)
-                    tensor_bytes = bytearray(offset_end - offset_start)
-                    f.readinto(tensor_bytes)
-                else:
-                    tensor_bytes = None
+                    f.readinto(arr)
 
-                tensor = self._deserialize_tensor(tensor_bytes, metadata)
-                return key, tensor, None
+                    # Copy to pinned (zero-copy possible in C++, here we do 1 CPU copy)
+                    # Ideally os.pread into numpy array wrapping torch tensor
+                    import ctypes
+                    # use ctypes to directly write into tensor ptr
+                    ctypes.memmove(view.data_ptr(), bytes(arr), sz)
+
+                    # Schedule GPU transfer
+                    # Must happen in same stream as allocator
+                    with torch.cuda.stream(cuda_stream):
+                        gpu_offset, gpu_view = gpu_slab.allocate(sz)
+                        gpu_view.copy_(view, non_blocking=True)
+
+                        # Create event to track when copy finishes
+                        event = torch.cuda.Event()
+                        event.record()
+
+                    return key, gpu_view, metadata, buf_idx, event
+                else:
+                    # Standard CPU Path
+                    if offset_start != offset_end:
+                        f = get_file_handle()
+                        f.seek(self._header_size + 8 + offset_start)
+                        tensor_bytes = bytearray(offset_end - offset_start)
+                        f.readinto(tensor_bytes)
+                    else:
+                        tensor_bytes = None
+
+                    tensor = self._deserialize_tensor(tensor_bytes, metadata)
+                    return key, tensor, None, None, None
             except Exception as e:
-                # Fallback info for main thread
-                return key, None, e
+                return key, None, e, None, None
 
         # Queue for individual (key, tensor) pairs
         # Size it to hold enough for prefetch_batches
@@ -362,8 +443,8 @@ class UnifiedSafetensorsLoader:
                     yield batch
                 break
 
-            k, t, err = res
-            if err is not None:
+            k, t, err, buf_idx, event = res
+            if err is not None and not isinstance(err, dict):
                 logging_utils.warning(f"Async load failed for {k}, falling back to sync: {err}")
                 # Fallback synchronous load
                 try:
@@ -372,8 +453,23 @@ class UnifiedSafetensorsLoader:
                     logging_utils.error(f"Sync fallback also failed for {k}: {sync_err}")
                     raise sync_err
 
+            if buf_idx is not None and event is not None:
+                # Wait for GPU copy to finish before releasing pinned buffer
+                event.synchronize()
+                pinned_pool.release(buf_idx)
+
+                # Reshape GPU view to tensor
+                meta = err # we reused err for metadata in direct_gpu path
+                dtype = self._get_torch_dtype(meta["dtype"])
+                shape = meta["shape"]
+
+                if meta["dtype"] in ["F8_E5M2", "F8_E4M3"]:
+                    t = self._convert_float8(t, meta["dtype"], shape)
+                else:
+                    t = t.view(dtype).reshape(shape)
+
             # Pin memory sequentially in the main thread to avoid OS-level lock contention
-            if pin_memory and t.device.type == 'cpu':
+            elif pin_memory and t.device.type == 'cpu':
                 try:
                     t = t.pin_memory()
                 except Exception as e:
