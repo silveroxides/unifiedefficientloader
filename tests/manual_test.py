@@ -30,6 +30,7 @@ def main():
     parser.add_argument("--limit", type=int, default=0, help="Maximum number of tensors to test per category (0 for no limit)")
     parser.add_argument("--chunk-size", type=int, default=100, help="Number of tensors to process before logging a summary chunk")
     parser.add_argument("--async-batch", type=int, default=0, help="If >0, uses async_stream with this batch size instead of sequential load")
+    parser.add_argument("--direct-gpu", action="store_true", help="Enable direct-to-GPU streaming pipeline")
     parser.add_argument("--low-memory", action="store_true", default=True, help="Enable memory-efficient streaming mode")
     parser.add_argument("--no-low-memory", action="store_false", dest="low_memory", help="Disable memory-efficient streaming mode (preload everything)")
     parser.add_argument("--workers", type=int, default=4, help="Number of background workers for async_stream (ignored, uses internal max)")
@@ -40,7 +41,17 @@ def main():
     setup_logging(args.debug)
     logger = logging.getLogger(__name__)
 
+    if args.direct_gpu:
+        if not args.low_memory:
+            logger.warning("direct_gpu=True requires low_memory=True. Forcing low_memory=True.")
+            args.low_memory = True
+        if args.async_batch == 0:
+            logger.info("direct_gpu=True requires async_stream. Forcing --async-batch=1.")
+            args.async_batch = 1
+
     logger.info(f"--- Starting Benchmark for {args.file} ---")
+    if args.direct_gpu:
+        logger.info("[Benchmark Mode] Direct-to-GPU Pipeline Active")
     script_start_time = time.time()
 
     # Grand Totals
@@ -61,7 +72,7 @@ def main():
     # 1. Benchmark Header Loading
     start_time = time.time()
     try:
-        loader = UnifiedSafetensorsLoader(args.file, low_memory=args.low_memory)
+        loader = UnifiedSafetensorsLoader(args.file, low_memory=args.low_memory, direct_gpu=args.direct_gpu)
     except Exception as e:
         logger.error(f"Failed to load file {args.file}: {e}")
         sys.exit(1)
@@ -145,7 +156,7 @@ def main():
 
                 # Use async_stream directly.
                 # If --batch-transfer is set, we enable sequential pinning in main thread.
-                stream = loader.async_stream(test_keys, batch_size=args.async_batch, pin_memory=args.batch_transfer)
+                stream = loader.async_stream(test_keys, batch_size=args.async_batch, pin_memory=args.batch_transfer, direct_gpu=args.direct_gpu)
 
                 for batch in stream:
                     for k, tensor in batch:
@@ -304,8 +315,9 @@ def main():
     logger.info(f"  -> Decoding Time      : {total_u8_convert_time:.4f}s")
     logger.info("")
     logger.info(f"Total Standard Tensors  : {total_std_tensors} tensors (Total Shape: {total_std_elements}, {total_std_bytes / (1024*1024):.2f} MB)")
+    loading_label = "Direct GPU (Disk->GPU)" if args.direct_gpu else "Data Loading Time  "
     logger.info(f"  -> Shape/NDIM Time    : {total_std_shape_time:.4f}s")
-    logger.info(f"  -> Data Loading Time  : {total_std_load_time:.4f}s")
+    logger.info(f"  -> {loading_label}  : {total_std_load_time:.4f}s")
     logger.info(f"  -> Pinned GPU Transfer: {total_std_transfer_gpu_time:.4f}s")
     logger.info(f"  -> CPU Return Transfer: {total_std_transfer_cpu_time:.4f}s")
     logger.info(f"  -> Memory Cleanup Time: {total_std_mark_time:.4f}s")
