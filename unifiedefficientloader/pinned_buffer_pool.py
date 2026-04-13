@@ -4,6 +4,7 @@ Pinned memory pool manager.
 Provides pre-allocated pinned buffers to avoid per-tensor allocation overhead.
 """
 from typing import Optional
+import torch
 from . import logging_utils
 
 logger = logging_utils.get_logger(__name__)

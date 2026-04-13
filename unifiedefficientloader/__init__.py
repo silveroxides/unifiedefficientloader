@@ -23,6 +23,8 @@ check_dependencies("torch")
 from .memory_efficient_loader import UnifiedSafetensorsLoader, MemoryEfficientSafeOpen
 from .tensor_utils import dict_to_tensor, tensor_to_dict
 from .pinned_transfer import transfer_to_gpu_pinned, set_verbose, get_pinned_transfer_stats, reset_pinned_transfer_stats
+from .gpu_buffer_pool import GpuBufferPool
+from .pinned_buffer_pool import PinnedBufferPool
 from .logging_utils import (
     setup_logging,
     MINIMAL_LEVEL,
@@ -47,6 +49,8 @@ __all__ = [
     "set_verbose",
     "get_pinned_transfer_stats",
     "reset_pinned_transfer_stats",
+    "GpuBufferPool",
+    "PinnedBufferPool",
     "setup_logging",
     "MINIMAL_LEVEL",
     "NORMAL_LEVEL",

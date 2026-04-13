@@ -44,7 +44,8 @@ def reset_pinned_transfer_stats():
 def transfer_to_gpu_pinned(
     tensor,
     device: str = 'cuda',
-    dtype = None
+    dtype = None,
+    non_blocking: bool = True
 ):
     """Transfer tensor to GPU using pinned memory for faster transfer."""
     torch = _ensure_torch()
@@ -53,22 +54,22 @@ def transfer_to_gpu_pinned(
     # Skip if not a CPU tensor or CUDA unavailable
     if tensor.device.type != 'cpu' or not torch.cuda.is_available():
         if dtype is not None:
-            return tensor.to(device=device, dtype=dtype)
-        return tensor.to(device=device)
+            return tensor.to(device=device, dtype=dtype, non_blocking=non_blocking)
+        return tensor.to(device=device, non_blocking=non_blocking)
 
     # Skip if target is not CUDA
     if not str(device).startswith('cuda'):
         if dtype is not None:
-            return tensor.to(device=device, dtype=dtype)
-        return tensor.to(device=device)
+            return tensor.to(device=device, dtype=dtype, non_blocking=non_blocking)
+        return tensor.to(device=device, non_blocking=non_blocking)
 
     try:
         pinned = tensor.pin_memory()
 
         if dtype is not None:
-            result = pinned.to(device=device, dtype=dtype, non_blocking=True)
+            result = pinned.to(device=device, dtype=dtype, non_blocking=non_blocking)
         else:
-            result = pinned.to(device=device, non_blocking=True)
+            result = pinned.to(device=device, non_blocking=non_blocking)
 
         torch.cuda.current_stream().synchronize()
 
@@ -95,5 +96,5 @@ def transfer_to_gpu_pinned(
             logging_utils.verbose(msg)
 
         if dtype is not None:
-            return tensor.to(device=device, dtype=dtype)
-        return tensor.to(device=device)
+            return tensor.to(device=device, dtype=dtype, non_blocking=non_blocking)
+        return tensor.to(device=device, non_blocking=non_blocking)
