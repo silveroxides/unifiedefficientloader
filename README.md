@@ -85,6 +85,33 @@ with UnifiedSafetensorsLoader("model.safetensors", low_memory=True) as loader:
             loader.mark_processed(key)
 ```
 
+### Direct-to-GPU Streaming (Zero-Copy)
+
+For the absolute fastest loading times on CUDA devices, use the `direct_gpu=True` flag. This creates a pipeline that pre-allocates pinned memory pools and GPU memory slabs. Tensors are loaded from disk directly into pinned buffers, and immediately asynchronously copied to the GPU using CUDA streams, hiding the PCIe transfer latency completely behind the disk I/O.
+
+```python
+from unifiedefficientloader import UnifiedSafetensorsLoader
+
+with UnifiedSafetensorsLoader("model.safetensors", low_memory=True, direct_gpu=True) as loader:
+    keys_to_load = loader.keys()
+    
+    # async_stream will automatically coordinate disk -> pinned buffer -> GPU slab -> tensor header
+    stream = loader.async_stream(
+        keys_to_load,
+        batch_size=8,
+        prefetch_batches=2,
+        direct_gpu=True # optional here since we passed it in __init__
+    )
+    
+    for batch in stream:
+        for key, gpu_tensor in batch:
+            # gpu_tensor is already on the GPU!
+            assert gpu_tensor.device.type == "cuda"
+            
+            # ... process gpu_tensor ...
+            loader.mark_processed(key)
+```
+
 ### Tensor/Dict Conversion
 
 ```python
