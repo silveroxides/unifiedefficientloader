@@ -30,17 +30,45 @@ def main():
     parser.add_argument("--limit", type=int, default=0, help="Maximum number of tensors to test per category (0 for no limit)")
     parser.add_argument("--chunk-size", type=int, default=100, help="Number of tensors to process before logging a summary chunk")
     parser.add_argument("--async-batch", type=int, default=0, help="If >0, uses async_stream with this batch size instead of sequential load")
+    parser.add_argument("--direct-gpu", action="store_true", help="Enable direct-to-GPU streaming pipeline")
     parser.add_argument("--low-memory", action="store_true", default=True, help="Enable memory-efficient streaming mode")
     parser.add_argument("--no-low-memory", action="store_false", dest="low_memory", help="Disable memory-efficient streaming mode (preload everything)")
-    parser.add_argument("--workers", type=int, default=4, help="Number of background workers for async_stream (ignored, uses internal max)")
     parser.add_argument("--batch-transfer", action="store_true", help="If set, enables sequential pinning in main thread via async_stream")
-    parser.add_argument("--transfer-count", type=int, default=0, help="Ignored in this version")
     args = parser.parse_args()
 
-    setup_logging(args.debug)
+    filepath = args.file
+    debug = args.debug
+    low_memory = args.low_memory
+    no_low_memory = not args.low_memory
+    chunk_size = args.chunk_size
+    async_batch = args.async_batch
+    if args.direct_gpu:
+        direct_gpu = True
+    else:
+        direct_gpu = False
+    if args.batch_transfer:
+        batch_transfer = True
+    else:
+        batch_transfer = False
+    setup_logging(debug)
     logger = logging.getLogger(__name__)
+    limit = args.limit if args.limit > 0 else "ALL"
+    device = torch.device(args.device)
+    logger.info(f"Running unifiedefficientloader benchmark on file: {filepath} | Limit: {limit} tensors per category | Device: {device} | Low Memory: {args.low_memory}")
+    
 
-    logger.info(f"--- Starting Benchmark for {args.file} ---")
+
+    if direct_gpu:
+        if no_low_memory:
+            logger.warning("direct_gpu=True requires low_memory=True. Forcing low_memory=True.")
+            low_memory = True
+        if async_batch == 0:
+            logger.info("direct_gpu=True requires async_stream. Forcing --async-batch=1.")
+            async_batch = 1
+
+    logger.info(f"--- Starting Benchmark for {filepath} ---")
+    if direct_gpu:
+        logger.info("[Benchmark Mode] Direct-to-GPU Pipeline Active")
     script_start_time = time.time()
 
     # Grand Totals
@@ -61,13 +89,13 @@ def main():
     # 1. Benchmark Header Loading
     start_time = time.time()
     try:
-        loader = UnifiedSafetensorsLoader(args.file, low_memory=args.low_memory)
+        loader = UnifiedSafetensorsLoader(filepath, low_memory=low_memory, direct_gpu=direct_gpu)
     except Exception as e:
-        logger.error(f"Failed to load file {args.file}: {e}")
+        logger.error(f"Failed to load file {filepath}: {e}")
         sys.exit(1)
     
     header_time = time.time() - start_time
-    logger.info(f"[Benchmark] Header initialization (low_memory={args.low_memory}) took {header_time:.5f} seconds")
+    logger.info(f"[Benchmark] Header initialization (low_memory={low_memory}) took {header_time:.5f} seconds")
 
     with loader:
         # 2. Benchmark Finding U8 Dictionary Tensors (1D only)
@@ -113,7 +141,7 @@ def main():
             chunk_count += 1
             total_u8_tensors += 1
             
-            if chunk_count >= args.chunk_size or idx == len(test_u8_keys):
+            if chunk_count >= chunk_size or idx == len(test_u8_keys):
                 logger.info(f"[U8 Chunk Summary] Processed {chunk_count} tensors ({chunk_bytes / 1024:.2f} KB) | "
                             f"Load: {chunk_load_time:.4f}s | Decode: {chunk_convert_time:.4f}s")
                 chunk_count = 0
@@ -129,8 +157,8 @@ def main():
             else:
                 test_keys = standard_keys
 
-            if args.async_batch > 0:
-                logger.info(f"--- Benchmarking {len(test_keys)} standard tensor(s) ASYNCHRONOUSLY via async_stream (batch={args.async_batch}, pin={args.batch_transfer}) ---")
+            if async_batch > 0:
+                logger.info(f"--- Benchmarking {len(test_keys)} standard tensor(s) ASYNCHRONOUSLY via async_stream (batch={async_batch}, pin={batch_transfer}) ---")
                 
                 stream_start_time = time.time()
                 
@@ -145,7 +173,12 @@ def main():
 
                 # Use async_stream directly.
                 # If --batch-transfer is set, we enable sequential pinning in main thread.
-                stream = loader.async_stream(test_keys, batch_size=args.async_batch, pin_memory=args.batch_transfer)
+                # In direct_gpu mode, it ignores pin_memory internally and forces true pinned memory.
+                if direct_gpu:
+                    pin_memory = True
+                else:
+                    pin_memory = batch_transfer
+                stream = loader.async_stream(test_keys, batch_size=async_batch, pin_memory=pin_memory)
 
                 for batch in stream:
                     for k, tensor in batch:
@@ -164,7 +197,7 @@ def main():
                         total_std_bytes += b_size
                         
                         start_time = time.time()
-                        gpu_tensor = transfer_to_gpu_pinned(tensor, device=args.device)
+                        gpu_tensor = transfer_to_gpu_pinned(tensor, device=device)
                         t_time = time.time() - start_time
                         chunk_transfer_time += t_time
                         total_std_transfer_gpu_time += t_time
@@ -184,11 +217,14 @@ def main():
                         total_std_mark_time += m_time
                         
                         del tensor, gpu_tensor, cpu_tensor
+                        if direct_gpu:
+                            import gc
+                            gc.collect()
                         
                         chunk_count += 1
                         total_std_tensors += 1
                         
-                        if chunk_count >= args.chunk_size or total_std_tensors == len(test_keys):
+                        if chunk_count >= chunk_size or total_std_tensors == len(test_keys):
                             total_chunk_time = time.time() - stream_start_time
                             approx_load = max(0, total_chunk_time - (chunk_transfer_time + chunk_transfer_back_time + chunk_mark_time + chunk_shape_time))
                             chunk_load_time += approx_load
@@ -249,7 +285,7 @@ def main():
 
                     # Transfer to GPU
                     start_time = time.time()
-                    gpu_tensor = transfer_to_gpu_pinned(tensor, device=args.device)
+                    gpu_tensor = transfer_to_gpu_pinned(tensor, device=device)
                     t_time = time.time() - start_time
                     chunk_transfer_time += t_time
                     total_std_transfer_gpu_time += t_time
@@ -276,7 +312,7 @@ def main():
                     chunk_count += 1
                     total_std_tensors += 1
                     
-                    if chunk_count >= args.chunk_size or idx == len(test_keys):
+                    if chunk_count >= chunk_size or idx == len(test_keys):
                         logger.info(
                             f"[Standard Chunk Summary] Processed {chunk_count} tensors (Total Shape: {chunk_elements}, "
                             f"{chunk_bytes / (1024*1024):.2f} MB) | "
@@ -304,8 +340,9 @@ def main():
     logger.info(f"  -> Decoding Time      : {total_u8_convert_time:.4f}s")
     logger.info("")
     logger.info(f"Total Standard Tensors  : {total_std_tensors} tensors (Total Shape: {total_std_elements}, {total_std_bytes / (1024*1024):.2f} MB)")
+    loading_label = "Direct GPU (Disk->GPU)" if direct_gpu else "Data Loading Time  "
     logger.info(f"  -> Shape/NDIM Time    : {total_std_shape_time:.4f}s")
-    logger.info(f"  -> Data Loading Time  : {total_std_load_time:.4f}s")
+    logger.info(f"  -> {loading_label}  : {total_std_load_time:.4f}s")
     logger.info(f"  -> Pinned GPU Transfer: {total_std_transfer_gpu_time:.4f}s")
     logger.info(f"  -> CPU Return Transfer: {total_std_transfer_cpu_time:.4f}s")
     logger.info(f"  -> Memory Cleanup Time: {total_std_mark_time:.4f}s")

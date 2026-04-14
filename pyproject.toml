@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unifiedefficientloader"
-version = "0.2.2"
+version = "0.2.3"
 description = "A unified interface for memory efficient per tensor loading of safetensors files as raw bytes from offset, handling CPU/GPU pinned transfers, and converting between tensors and dicts."
 readme = "README.md"
 authors = [
@@ -35,3 +35,8 @@ log_cli_date_format = "%Y-%m-%d %H:%M:%S"
 filterwarnings = [
     "ignore:.*argument 'device' of Tensor.*:DeprecationWarning"
 ]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["unifiedefficientloader*"]
+exclude = ["reference"]
