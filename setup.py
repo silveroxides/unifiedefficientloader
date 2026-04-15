@@ -23,6 +23,13 @@ def _read_pyproject_version():
     return m.group(1)
 
 
+def _read_readme():
+    readme = Path(__file__).parent / "README.md"
+    if readme.exists():
+        return readme.read_text(encoding="utf-8")
+    return ""
+
+
 class BuildUELExtension(build_ext):
     """
     Custom build_ext that compiles the raw C shared library (uel.dll / uel.so)
@@ -290,6 +297,8 @@ class BdistWheel(wheel.bdist_wheel.bdist_wheel):
 setup(
     name="unifiedefficientloader",
     version=_read_pyproject_version(),
+    long_description=_read_readme(),
+    long_description_content_type="text/markdown",
     distclass=BinaryDistribution,
     cmdclass={
         "build_ext": BuildUELExtension,
