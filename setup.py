@@ -1,5 +1,4 @@
 import os
-import sys
 import re
 import subprocess
 import platform
@@ -73,29 +72,6 @@ class BuildUELExtension(build_ext):
                     f"CUDA not found at {p} and nvcc not in PATH. Set CUDA_PATH."
                 )
         return Path(p)
-
-    def _vcvars(self):
-        vswhere = (
-            Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
-            / "Microsoft Visual Studio"
-            / "Installer"
-            / "vswhere.exe"
-        )
-        if not vswhere.exists():
-            raise RuntimeError("vswhere.exe not found. Install Visual Studio.")
-        result = subprocess.run(
-            [str(vswhere), "-latest", "-property", "installationPath"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        vs = result.stdout.strip()
-        if not vs:
-            raise RuntimeError("Visual Studio not found.")
-        vcvars = Path(vs) / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
-        if not vcvars.exists():
-            raise RuntimeError(f"vcvars64.bat not found at {vcvars}")
-        return str(vcvars)
 
     def _ensure_detours(self, build_temp: Path) -> Path:
         detours_dir = build_temp / "Detours"

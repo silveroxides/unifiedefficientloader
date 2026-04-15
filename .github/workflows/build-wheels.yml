@@ -46,19 +46,10 @@ jobs:
             echo "changed=false" >> $GITHUB_OUTPUT
           fi
 
-  build:
-    name: Build wheel (${{ matrix.platform }})
+  build-windows:
+    name: Build wheel (win_amd64)
     needs: version-check
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            platform: win_amd64
-          - os: ubuntu-latest
-            platform: linux_x86_64
-
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -67,26 +58,15 @@ jobs:
         with:
           python-version: '3.9'
 
-      - name: Install CUDA Toolkit (Windows - network, headers only)
-        if: matrix.os == 'windows-latest'
+      - name: Install CUDA Toolkit
         uses: Jimver/cuda-toolkit@v0.2.35
         with:
           cuda: '12.6.3'
           method: 'network'
           sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
-          log-file-suffix: '${{ matrix.platform }}.txt'
+          log-file-suffix: 'win_amd64.txt'
 
-      - name: Install CUDA Toolkit (Linux - local)
-        if: matrix.os == 'ubuntu-latest'
-        uses: Jimver/cuda-toolkit@v0.2.35
-        with:
-          cuda: '12.6.3'
-          method: 'local'
-          linux-local-args: '["--toolkit"]'
-          log-file-suffix: '${{ matrix.platform }}.txt'
-
-      - name: Set up MSVC (Windows only)
-        if: matrix.os == 'windows-latest'
+      - name: Set up MSVC
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
@@ -96,30 +76,64 @@ jobs:
           python -m pip install --upgrade pip
           pip install setuptools wheel
 
-      - name: Install auditwheel (Linux only)
-        if: matrix.os == 'ubuntu-latest'
-        run: pip install auditwheel
-
       - name: Build wheel
         run: python setup.py bdist_wheel
 
-      - name: Repair wheel with auditwheel (Linux only)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-win_amd64
+          path: dist/
+          retention-days: 5
+
+  build-linux:
+    name: Build wheel (manylinux_2_28_x86_64)
+    needs: version-check
+    runs-on: ubuntu-latest
+    container:
+      image: quay.io/pypa/manylinux_2_28_x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install CUDA 12.6 headers and driver stub
         run: |
-          auditwheel repair dist/*.whl --plat manylinux_2_17_x86_64 -w dist/repaired/
+          dnf install -y dnf-plugins-core
+          dnf config-manager --add-repo \
+            https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
+          dnf install -y cuda-cudart-devel-12-6 cuda-driver-devel-12-6
+          echo "CUDA_PATH=/usr/local/cuda-12.6" >> $GITHUB_ENV
+
+      - name: Install build dependencies
+        run: /opt/python/cp39-cp39/bin/pip install setuptools wheel auditwheel
+
+      - name: Build wheel
+        run: /opt/python/cp39-cp39/bin/python setup.py bdist_wheel
+
+      - name: Repair wheel with auditwheel
+        run: |
+          # auditwheel resolves libraries via ldconfig, not LD_LIBRARY_PATH.
+          # The CUDA driver stub (libcuda.so) is installed by cuda-driver-devel
+          # but has no .so.1 symlink and is not in ldconfig's search path.
+          # Create the versioned symlink and register it so auditwheel finds it.
+          # libcuda.so.1 is on the manylinux external-libs whitelist — it will
+          # not be bundled into the wheel, only used for symbol resolution.
+          ln -sf /usr/local/cuda-12.6/lib64/stubs/libcuda.so /usr/local/lib64/libcuda.so.1
+          ldconfig
+          /opt/python/cp39-cp39/bin/auditwheel repair dist/*.whl \
+            -w dist/repaired/
           rm dist/*.whl
           mv dist/repaired/*.whl dist/
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.platform }}
+          name: wheels-linux_x86_64
           path: dist/
           retention-days: 5
 
   publish:
     name: Publish to PyPI
-    needs: [version-check, build]
+    needs: [version-check, build-windows, build-linux]
     if: needs.version-check.outputs.changed == 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
@@ -130,7 +144,7 @@ jobs:
           merge-multiple: true
           path: dist/
 
-      - name: Create Release
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.version-check.outputs.version }}
@@ -138,7 +152,6 @@ jobs:
           generate_release_notes: true
           draft: false
           fail_on_unmatched_files: true
-          make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
