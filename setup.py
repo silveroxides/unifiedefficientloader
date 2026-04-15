@@ -1,5 +1,6 @@
 import os
 import sys
+import re
 import subprocess
 import platform
 import urllib.request
@@ -7,9 +8,19 @@ import zipfile
 import shutil
 from pathlib import Path
 import setuptools
-import setuptools.command.bdist_wheel
+import wheel.bdist_wheel
 from setuptools import setup, Distribution, Extension
 from setuptools.command.build_ext import build_ext
+
+
+def _read_pyproject_version():
+    """Read version from pyproject.toml without importing any build tools."""
+    pyproject = Path(__file__).parent / "pyproject.toml"
+    text = pyproject.read_text(encoding="utf-8")
+    m = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+    if not m:
+        raise RuntimeError("Could not find version in pyproject.toml")
+    return m.group(1)
 
 
 class BuildUELExtension(build_ext):
@@ -137,17 +148,24 @@ class BuildUELExtension(build_ext):
         build_temp = Path(self.build_temp).resolve()
         build_temp.mkdir(parents=True, exist_ok=True)
 
-        # DLL/SO must land in the source package dir so package_data picks it up
-        # for wheel packaging. All intermediate artifacts stay in build_temp.
+        # DLL/SO must land in both:
+        #   1. source package dir (so editable installs work + staleness check)
+        #   2. build_lib (so bdist_wheel/install_lib picks it up into the wheel)
         pkg_uel_dir = Path("unifiedefficientloader/uel").resolve()
+
+        # build_lib is set by setuptools (e.g. build/lib.linux-x86_64-cpython-39)
+        build_lib_uel_dir = Path(self.build_lib) / "unifiedefficientloader" / "uel"
+        build_lib_uel_dir.mkdir(parents=True, exist_ok=True)
 
         src_root = Path("unifiedefficientloader/uel/src").resolve()
         system = platform.system()
 
         if system == "Windows":
             self._build_windows(build_temp, pkg_uel_dir, src_root)
+            shutil.copy2(pkg_uel_dir / "uel.dll", build_lib_uel_dir / "uel.dll")
         else:
             self._build_linux(build_temp, pkg_uel_dir, src_root)
+            shutil.copy2(pkg_uel_dir / "uel.so", build_lib_uel_dir / "uel.so")
 
     def _build_windows(self, build_temp: Path, pkg_uel_dir: Path, src_root: Path):
         src_win = Path("unifiedefficientloader/uel/src-win").resolve()
@@ -232,7 +250,7 @@ class BinaryDistribution(Distribution):
 _ABI3_MIN_PYTHON = (3, 9)
 
 
-class BdistWheel(setuptools.command.bdist_wheel.bdist_wheel):
+class BdistWheel(wheel.bdist_wheel.bdist_wheel):
     """
     bdist_wheel subclass that:
     - Accepts --force and forwards it to build_ext.
@@ -244,12 +262,10 @@ class BdistWheel(setuptools.command.bdist_wheel.bdist_wheel):
         python setup.py build_ext bdist_wheel --force
     """
 
-    user_options = setuptools.command.bdist_wheel.bdist_wheel.user_options + [
+    user_options = wheel.bdist_wheel.bdist_wheel.user_options + [
         ("force", "f", "forcibly rebuild C extension (ignore timestamps)"),
     ]
-    boolean_options = setuptools.command.bdist_wheel.bdist_wheel.boolean_options + [
-        "force"
-    ]
+    boolean_options = wheel.bdist_wheel.bdist_wheel.boolean_options + ["force"]
 
     def initialize_options(self):
         super().initialize_options()
@@ -272,6 +288,8 @@ class BdistWheel(setuptools.command.bdist_wheel.bdist_wheel):
 
 
 setup(
+    name="unifiedefficientloader",
+    version=_read_pyproject_version(),
     distclass=BinaryDistribution,
     cmdclass={
         "build_ext": BuildUELExtension,
