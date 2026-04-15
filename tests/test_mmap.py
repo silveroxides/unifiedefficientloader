@@ -70,10 +70,12 @@ def test_mmap_fallback_when_unavailable(sample_file, monkeypatch):
     """
     path, tensors = sample_file
 
-    # Patch control.init to simulate missing library
+    # Patch control to simulate missing library — null out lib AND prevent
+    # init() from reloading it during the loader's use_mmap init block.
     import unifiedefficientloader.uel.control as ctrl
 
     monkeypatch.setattr(ctrl, "lib", None)
+    monkeypatch.setattr(ctrl, "init", lambda: False)
 
     with UnifiedSafetensorsLoader(path, low_memory=True, use_mmap=True) as loader:
         assert loader.use_mmap is False, "Should fall back to IO when lib unavailable"

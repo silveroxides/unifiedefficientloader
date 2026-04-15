@@ -185,6 +185,10 @@ class UnifiedSafetensorsLoader:
         if self._file:
             self._file.close()
             self._file = None
+        # Release MMAP — critical on Windows where mapped file cannot be deleted
+        # while the mapping is alive.
+        self._mmap = None
+        self._mmap_view = None
         self._tensors.clear()
 
     def keys(self):
@@ -582,10 +586,6 @@ class UnifiedSafetensorsLoader:
         while True:
             res = q.get()
             if res is None:
-                # Synchronize and cleanup any remaining buffers on exit
-                for ev, idx in pending_pinned:
-                    ev.synchronize()
-                    pinned_pool.release(idx)
                 if batch:
                     yield batch
                 break
@@ -605,15 +605,12 @@ class UnifiedSafetensorsLoader:
                     raise sync_err
 
             if buf_idx is not None and event is not None:
-                # Don't block here! Yield the tensor with its event.
-                # Only release the PREVIOUS batch's buffers.
-                # This creates a sliding window of safety.
-                while len(pending_pinned) >= (max_in_flight + 1):
-                    ev, idx = pending_pinned.pop(0)
-                    ev.synchronize()  # Wait only if we MUST reuse a buffer
-                    pinned_pool.release(idx)
+                # Synchronize before reshaping — GPU copy must complete before
+                # we hand the tensor to the caller or values will be garbage.
+                event.synchronize()
 
-                pending_pinned.append((event, buf_idx))
+                # Release the pinned staging buffer now that copy is complete
+                pinned_pool.release(buf_idx)
 
                 # Register GPU index for cleanup
                 self._gpu_buffer_indices[k] = gpu_idx

@@ -40,25 +40,25 @@ def main():
     # Step 1: Preload everything into RAM (Standard safetensors usage)
     logger.info("Loading entire model into system memory via safetensors.safe_open...")
     preload_start_time = time.time()
-    
+
     loaded_tensors = {}
     try:
         with safe_open(args.file, framework="pt", device="cpu") as f:
             all_keys = f.keys()
-            
+
             # Progress bar if possible
             try:
                 from tqdm import tqdm
                 iterator = tqdm(all_keys, desc="Preloading tensors")
             except ImportError:
                 iterator = all_keys
-                
+
             for k in iterator:
                 loaded_tensors[k] = f.get_tensor(k)
     except Exception as e:
         logger.error(f"Failed to preload file {args.file}: {e}")
         sys.exit(1)
-        
+
     preload_time = time.time() - preload_start_time
     logger.info(f"[Benchmark] Full model preload took {preload_time:.5f} seconds (Found {len(loaded_tensors)} tensors)")
 
@@ -91,13 +91,13 @@ def main():
         chunk_count = 0
         chunk_convert_time = 0.0
         chunk_bytes = 0
-        
+
         for idx, key in enumerate(test_u8_keys, 1):
             tensor = loaded_tensors[key]
             b_size = tensor.numel() * tensor.element_size()
             chunk_bytes += b_size
             total_u8_bytes += b_size
-            
+
             # Convert (decode JSON)
             start_time = time.time()
             try:
@@ -107,10 +107,10 @@ def main():
                 total_u8_convert_time += c_time
             except Exception as e:
                 logger.warning(f"Failed to decode '{key}' as JSON dict: {e}")
-            
+
             chunk_count += 1
             total_u8_tensors += 1
-            
+
             if chunk_count >= args.chunk_size or idx == len(test_u8_keys):
                 logger.info(f"[U8 Chunk Summary] Processed {chunk_count} tensors ({chunk_bytes / 1024:.2f} KB) | "
                             f"Decode: {chunk_convert_time:.4f}s")
@@ -122,7 +122,7 @@ def main():
     test_std_keys = standard_keys[:args.limit] if args.limit > 0 else standard_keys
     if test_std_keys:
         logger.info(f"--- Benchmarking {len(test_std_keys)} standard tensor(s) (transfer from RAM) ---")
-        
+
         chunk_count = 0
         chunk_shape_time = 0.0
         chunk_load_time = 0.0
@@ -140,7 +140,7 @@ def main():
             s_time = time.time() - start_time
             chunk_shape_time += s_time
             total_std_shape_time += s_time
-            
+
             elements = math.prod(shape) if shape else 0
             chunk_elements += elements
             total_std_elements += elements
@@ -151,7 +151,7 @@ def main():
             l_time = time.time() - start_time
             chunk_load_time += l_time
             total_std_load_time += l_time
-            
+
             b_size = tensor.numel() * tensor.element_size()
             chunk_bytes += b_size
             total_std_bytes += b_size
@@ -180,10 +180,10 @@ def main():
             m_time = time.time() - start_time
             chunk_mark_time += m_time
             total_std_mark_time += m_time
-            
+
             chunk_count += 1
             total_std_tensors += 1
-            
+
             if chunk_count >= args.chunk_size or idx == len(test_std_keys):
                 logger.info(
                     f"[Standard Chunk Summary] Processed {chunk_count} tensors (Total Shape: {chunk_elements}, "
@@ -218,12 +218,12 @@ def main():
     logger.info(f"  -> Pinned GPU Transfer: {total_std_transfer_gpu_time:.4f}s")
     logger.info(f"  -> CPU Return Transfer: {total_std_transfer_cpu_time:.4f}s")
     logger.info(f"  -> Memory Cleanup Time: {total_std_mark_time:.4f}s")
-    
+
     total_transfer_loop_time = (
-        total_std_shape_time + 
-        total_std_load_time + 
-        total_std_transfer_gpu_time + 
-        total_std_transfer_cpu_time + 
+        total_std_shape_time +
+        total_std_load_time +
+        total_std_transfer_gpu_time +
+        total_std_transfer_cpu_time +
         total_std_mark_time
     )
     logger.info(f"  => TRANSFER LOOP TIME : {total_transfer_loop_time:.4f}s")

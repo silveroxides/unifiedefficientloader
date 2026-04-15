@@ -55,7 +55,7 @@ def main():
     limit = args.limit if args.limit > 0 else "ALL"
     device = torch.device(args.device)
     logger.info(f"Running unifiedefficientloader benchmark on file: {filepath} | Limit: {limit} tensors per category | Device: {device} | Low Memory: {args.low_memory}")
-    
+
 
 
     if direct_gpu:
@@ -93,7 +93,7 @@ def main():
     except Exception as e:
         logger.error(f"Failed to load file {filepath}: {e}")
         sys.exit(1)
-    
+
     header_time = time.time() - start_time
     logger.info(f"[Benchmark] Header initialization (low_memory={low_memory}) took {header_time:.5f} seconds")
 
@@ -110,12 +110,12 @@ def main():
         # 3. Benchmark Loading and Converting U8 Tensors
         test_u8_keys = uint8_tensor_keys[:args.limit] if args.limit > 0 else uint8_tensor_keys
         logger.info(f"--- Benchmarking {len(test_u8_keys)} U8 tensor(s) ---")
-        
+
         chunk_count = 0
         chunk_load_time = 0.0
         chunk_convert_time = 0.0
         chunk_bytes = 0
-        
+
         for idx, key in enumerate(test_u8_keys, 1):
             # Load
             start_time = time.time()
@@ -123,11 +123,11 @@ def main():
             l_time = time.time() - start_time
             chunk_load_time += l_time
             total_u8_load_time += l_time
-            
+
             b_size = tensor.numel() * tensor.element_size()
             chunk_bytes += b_size
             total_u8_bytes += b_size
-            
+
             # Convert
             start_time = time.time()
             try:
@@ -137,10 +137,10 @@ def main():
                 total_u8_convert_time += c_time
             except Exception as e:
                 logger.warning(f"Failed to decode '{key}' as JSON dict: {e}")
-            
+
             chunk_count += 1
             total_u8_tensors += 1
-            
+
             if chunk_count >= chunk_size or idx == len(test_u8_keys):
                 logger.info(f"[U8 Chunk Summary] Processed {chunk_count} tensors ({chunk_bytes / 1024:.2f} KB) | "
                             f"Load: {chunk_load_time:.4f}s | Decode: {chunk_convert_time:.4f}s")
@@ -159,9 +159,9 @@ def main():
 
             if async_batch > 0:
                 logger.info(f"--- Benchmarking {len(test_keys)} standard tensor(s) ASYNCHRONOUSLY via async_stream (batch={async_batch}, pin={batch_transfer}) ---")
-                
+
                 stream_start_time = time.time()
-                
+
                 chunk_count = 0
                 chunk_shape_time = 0.0
                 chunk_load_time = 0.0
@@ -191,11 +191,11 @@ def main():
                         elements = math.prod(shape) if shape else 0
                         chunk_elements += elements
                         total_std_elements += elements
-                        
+
                         b_size = tensor.numel() * tensor.element_size()
                         chunk_bytes += b_size
                         total_std_bytes += b_size
-                        
+
                         start_time = time.time()
                         gpu_tensor = transfer_to_gpu_pinned(tensor, device=device)
                         t_time = time.time() - start_time
@@ -215,21 +215,21 @@ def main():
                         m_time = time.time() - start_time
                         chunk_mark_time += m_time
                         total_std_mark_time += m_time
-                        
+
                         del tensor, gpu_tensor, cpu_tensor
                         if direct_gpu:
                             import gc
                             gc.collect()
-                        
+
                         chunk_count += 1
                         total_std_tensors += 1
-                        
+
                         if chunk_count >= chunk_size or total_std_tensors == len(test_keys):
                             total_chunk_time = time.time() - stream_start_time
                             approx_load = max(0, total_chunk_time - (chunk_transfer_time + chunk_transfer_back_time + chunk_mark_time + chunk_shape_time))
                             chunk_load_time += approx_load
                             total_std_load_time += approx_load
-                            
+
                             logger.info(
                                 f"[Async Chunk Summary] Processed {chunk_count} tensors (Total Shape: {chunk_elements}, "
                                 f"{chunk_bytes / (1024*1024):.2f} MB) | "
@@ -245,12 +245,12 @@ def main():
                             chunk_bytes = 0
                             chunk_elements = 0
                             stream_start_time = time.time()
-                    
+
                     batch.clear()
                     del batch
             else:
                 logger.info(f"--- Benchmarking {len(test_keys)} standard tensor(s) SEQUENTIALLY ---")
-                
+
                 chunk_count = 0
                 chunk_shape_time = 0.0
                 chunk_load_time = 0.0
@@ -267,7 +267,7 @@ def main():
                     s_time = time.time() - start_time
                     chunk_shape_time += s_time
                     total_std_shape_time += s_time
-                    
+
                     elements = math.prod(shape) if shape else 0
                     chunk_elements += elements
                     total_std_elements += elements
@@ -278,7 +278,7 @@ def main():
                     l_time = time.time() - start_time
                     chunk_load_time += l_time
                     total_std_load_time += l_time
-                    
+
                     b_size = tensor.numel() * tensor.element_size()
                     chunk_bytes += b_size
                     total_std_bytes += b_size
@@ -305,13 +305,13 @@ def main():
                     m_time = time.time() - start_time
                     chunk_mark_time += m_time
                     total_std_mark_time += m_time
-                    
+
                     # Cleanup manually
                     del tensor, gpu_tensor, cpu_tensor
-                    
+
                     chunk_count += 1
                     total_std_tensors += 1
-                    
+
                     if chunk_count >= chunk_size or idx == len(test_keys):
                         logger.info(
                             f"[Standard Chunk Summary] Processed {chunk_count} tensors (Total Shape: {chunk_elements}, "
@@ -346,12 +346,12 @@ def main():
     logger.info(f"  -> Pinned GPU Transfer: {total_std_transfer_gpu_time:.4f}s")
     logger.info(f"  -> CPU Return Transfer: {total_std_transfer_cpu_time:.4f}s")
     logger.info(f"  -> Memory Cleanup Time: {total_std_mark_time:.4f}s")
-    
+
     total_roundtrip_time = (
-        total_std_shape_time + 
-        total_std_load_time + 
-        total_std_transfer_gpu_time + 
-        total_std_transfer_cpu_time + 
+        total_std_shape_time +
+        total_std_load_time +
+        total_std_transfer_gpu_time +
+        total_std_transfer_cpu_time +
         total_std_mark_time
     )
     logger.info(f"  => FULL ROUNDTRIP TIME: {total_roundtrip_time:.4f}s")
