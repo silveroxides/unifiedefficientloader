@@ -65,7 +65,11 @@ class UnifiedSafetensorsLoader:
 
     @logging_utils.log_debug
     def __init__(
-        self, filename: str, low_memory: bool = False, direct_gpu: bool = False
+        self,
+        filename: str,
+        low_memory: bool = False,
+        direct_gpu: bool = False,
+        use_mmap: bool = False,
     ):
         """Initialize the loader.
 
@@ -73,6 +77,7 @@ class UnifiedSafetensorsLoader:
             filename: Path to safetensors file
             low_memory: If True, use streaming mode; if False, preload all tensors
             direct_gpu: If True, stream directly to GPU pinned/slab memory (requires low_memory=True)
+            use_mmap: If True, map file to virtual memory instead of file reads
         """
         torch = _ensure_torch()
         safe_open = _ensure_safetensors()
@@ -80,12 +85,40 @@ class UnifiedSafetensorsLoader:
         self.filename = filename
         self.low_memory = low_memory
         self.direct_gpu = direct_gpu
+        self.use_mmap = use_mmap
 
         if self.direct_gpu and not self.low_memory:
             logging_utils.warning(
                 "direct_gpu=True requires low_memory=True. Forcing low_memory=True."
             )
             self.low_memory = True
+
+        if self.use_mmap:
+            try:
+                from .uel.model_mmap import ModelMMAP
+                from .uel import control
+                import os
+                import ctypes
+
+                if control.lib is None:
+                    control.init()
+
+                self._mmap = ModelMMAP(self.filename)
+                self._mmap_size = os.path.getsize(self.filename)
+                self._mmap_view = memoryview(
+                    (ctypes.c_uint8 * self._mmap_size).from_address(self._mmap.get())
+                )
+                logging_utils.verbose(f"Initialized MMAP mode for {self.filename}")
+            except Exception as e:
+                logging_utils.warning(
+                    f"Failed to initialize MMAP: {e}. Falling back to standard IO."
+                )
+                self.use_mmap = False
+                self._mmap = None
+                self._mmap_view = None
+        else:
+            self._mmap = None
+            self._mmap_view = None
 
         self._tensors: Dict[str, "torch.Tensor"] = {}
         self._gpu_buffer_indices: Dict[str, int] = {}
@@ -201,6 +234,27 @@ class UnifiedSafetensorsLoader:
         offset_start, offset_end = metadata["data_offsets"]
 
         if offset_start != offset_end:
+            if self.use_mmap:
+                logging_utils.debug(f"Loading tensor '{key}' from MMAP")
+                tensor_view = self._mmap_view[
+                    self._header_size + 8 + offset_start : self._header_size
+                    + 8
+                    + offset_end
+                ]
+                import warnings
+
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore", message="The given buffer is not writable"
+                    )
+                    dtype = self._get_torch_dtype(metadata["dtype"])
+                    tensor = torch.frombuffer(tensor_view, dtype=dtype).view(
+                        metadata["shape"]
+                    )
+                    storage = tensor.untyped_storage()
+                    setattr(storage, "_uel_mmap_ref", self._mmap)
+                    return tensor
+
             logging_utils.debug(
                 f"Loading tensor '{key}' from offset {offset_start} to {offset_end} ({(offset_end - offset_start)} bytes)"
             )
@@ -408,15 +462,33 @@ class UnifiedSafetensorsLoader:
 
                             view = pinned_buf[:sz]
 
-                            # Create a ctypes c_uint8 array spanning the pinned buffer memory
-                            # This allows f.readinto() to write bytes directly to the torch tensor memory
-                            c_uint8_array = (ctypes.c_uint8 * sz).from_address(
-                                view.data_ptr()
-                            )
+                            if self.use_mmap:
+                                tensor_view = self._mmap_view[
+                                    self._header_size
+                                    + 8
+                                    + offset_start : self._header_size + 8 + offset_end
+                                ]
+                                import warnings
 
-                            f = get_file_handle()
-                            f.seek(self._header_size + 8 + offset_start)
-                            f.readinto(c_uint8_array)
+                                with warnings.catch_warnings():
+                                    warnings.filterwarnings(
+                                        "ignore",
+                                        message="The given buffer is not writable",
+                                    )
+                                    mmap_tensor = torch.frombuffer(
+                                        tensor_view, dtype=torch.uint8
+                                    )
+                                    view.copy_(mmap_tensor)
+                            else:
+                                # Create a ctypes c_uint8 array spanning the pinned buffer memory
+                                # This allows f.readinto() to write bytes directly to the torch tensor memory
+                                c_uint8_array = (ctypes.c_uint8 * sz).from_address(
+                                    view.data_ptr()
+                                )
+
+                                f = get_file_handle()
+                                f.seek(self._header_size + 8 + offset_start)
+                                f.readinto(c_uint8_array)
 
                             gpu_view = gpu_buf[:sz]
 
@@ -445,10 +517,18 @@ class UnifiedSafetensorsLoader:
                 else:
                     # Standard CPU Path
                     if offset_start != offset_end:
-                        f = get_file_handle()
-                        f.seek(self._header_size + 8 + offset_start)
-                        tensor_bytes = bytearray(offset_end - offset_start)
-                        f.readinto(tensor_bytes)
+                        if self.use_mmap:
+                            tensor_view = self._mmap_view[
+                                self._header_size + 8 + offset_start : self._header_size
+                                + 8
+                                + offset_end
+                            ]
+                            tensor_bytes = bytearray(tensor_view)
+                        else:
+                            f = get_file_handle()
+                            f.seek(self._header_size + 8 + offset_start)
+                            tensor_bytes = bytearray(offset_end - offset_start)
+                            f.readinto(tensor_bytes)
                     else:
                         tensor_bytes = None
 
