@@ -2,6 +2,10 @@
 
 A unified interface for loading safetensors, handling CPU/GPU pinned transfers, and converting between tensors and dicts.
 
+## Documentation
+
+Full API reference and guides in [docs/](docs/index.md).
+
 ## Installation
 
 You can install this package via pip. Since it heavily relies on `torch` and `safetensors` but doesn't strictly force them as hard dependencies for package building/installation, make sure you have them installed in your environment:
@@ -93,24 +97,32 @@ For the absolute fastest loading times on CUDA devices, use the `direct_gpu=True
 from unifiedefficientloader import UnifiedSafetensorsLoader
 
 with UnifiedSafetensorsLoader("model.safetensors", low_memory=True, direct_gpu=True) as loader:
-    keys_to_load = loader.keys()
-    
-    # async_stream will automatically coordinate disk -> pinned buffer -> GPU slab -> tensor header
     stream = loader.async_stream(
-        keys_to_load,
+        loader.keys(),
         batch_size=8,
         prefetch_batches=2,
-        direct_gpu=True # optional here since we passed it in __init__
     )
-    
     for batch in stream:
         for key, gpu_tensor in batch:
-            # gpu_tensor is already on the GPU!
+            # gpu_tensor is already on the GPU
             assert gpu_tensor.device.type == "cuda"
-            
             # ... process gpu_tensor ...
-            loader.mark_processed(key)
+            loader.mark_processed(key)  # releases GPU buffer back to pool
 ```
+
+### Zero-Copy MMAP Loading
+
+`use_mmap=True` maps the file into virtual memory via the `uel` native extension. No data is copied into RAM — PyTorch holds a direct pointer into OS page cache.
+
+```python
+from unifiedefficientloader import UnifiedSafetensorsLoader
+
+with UnifiedSafetensorsLoader("model.safetensors", low_memory=True, use_mmap=True) as loader:
+    state_dict = loader.load_all()
+    # all tensors are zero-copy views into mapped memory
+```
+
+Requires the `uel` native extension to be compiled. Falls back silently to standard IO if unavailable. See [docs/mmap.md](docs/mmap.md) and [docs/building.md](docs/building.md).
 
 ### Tensor/Dict Conversion
 

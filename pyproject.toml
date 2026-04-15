@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=61.0.0", "wheel"]
+requires = ["setuptools>=70.1.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "unifiedefficientloader"
-version = "0.2.3"
+version = "0.3.0"
 description = "A unified interface for memory efficient per tensor loading of safetensors files as raw bytes from offset, handling CPU/GPU pinned transfers, and converting between tensors and dicts."
 readme = "README.md"
 authors = [
@@ -16,7 +16,8 @@ classifiers = [
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
 ]
 requires-python = ">=3.9"
 dependencies = []

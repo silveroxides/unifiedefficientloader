@@ -4,6 +4,7 @@ Unified safetensors loader with optional memory-efficient mode.
 Provides a consistent interface for tensor loading regardless of mode.
 Requires `torch`, `safetensors`, and optionally `tqdm`.
 """
+
 import gc
 import json
 import struct
@@ -13,25 +14,35 @@ from . import logging_utils
 
 logger = logging_utils.get_logger(__name__)
 
+
 def _ensure_torch():
     try:
         import torch
+
         return torch
     except ImportError:
-        raise ImportError("The 'torch' package is required but not installed. Please install it.")
+        raise ImportError(
+            "The 'torch' package is required but not installed. Please install it."
+        )
+
 
 def _ensure_safetensors():
     try:
         import safetensors
         from safetensors import safe_open
+
         return safe_open
     except ImportError:
-        raise ImportError("The 'safetensors' package is required but not installed. Please install it.")
+        raise ImportError(
+            "The 'safetensors' package is required but not installed. Please install it."
+        )
+
 
 try:
     import torch
 except ImportError:
     pass
+
 
 class UnifiedSafetensorsLoader:
     """Unified safetensors loader supporting both preload and streaming modes.
@@ -53,13 +64,20 @@ class UnifiedSafetensorsLoader:
     """
 
     @logging_utils.log_debug
-    def __init__(self, filename: str, low_memory: bool = False, direct_gpu: bool = False):
+    def __init__(
+        self,
+        filename: str,
+        low_memory: bool = False,
+        direct_gpu: bool = False,
+        use_mmap: bool = False,
+    ):
         """Initialize the loader.
 
         Args:
             filename: Path to safetensors file
             low_memory: If True, use streaming mode; if False, preload all tensors
             direct_gpu: If True, stream directly to GPU pinned/slab memory (requires low_memory=True)
+            use_mmap: If True, map file to virtual memory instead of file reads
         """
         torch = _ensure_torch()
         safe_open = _ensure_safetensors()
@@ -67,12 +85,42 @@ class UnifiedSafetensorsLoader:
         self.filename = filename
         self.low_memory = low_memory
         self.direct_gpu = direct_gpu
+        self.use_mmap = use_mmap
 
         if self.direct_gpu and not self.low_memory:
-            logging_utils.warning("direct_gpu=True requires low_memory=True. Forcing low_memory=True.")
+            logging_utils.warning(
+                "direct_gpu=True requires low_memory=True. Forcing low_memory=True."
+            )
             self.low_memory = True
 
-        self._tensors: Dict[str, 'torch.Tensor'] = {}
+        if self.use_mmap:
+            try:
+                from .uel.model_mmap import ModelMMAP
+                from .uel import control
+                import os
+                import ctypes
+
+                if control.lib is None:
+                    control.init()
+
+                self._mmap = ModelMMAP(self.filename)
+                self._mmap_size = os.path.getsize(self.filename)
+                self._mmap_view = memoryview(
+                    (ctypes.c_uint8 * self._mmap_size).from_address(self._mmap.get())
+                )
+                logging_utils.verbose(f"Initialized MMAP mode for {self.filename}")
+            except Exception as e:
+                logging_utils.warning(
+                    f"Failed to initialize MMAP: {e}. Falling back to standard IO."
+                )
+                self.use_mmap = False
+                self._mmap = None
+                self._mmap_view = None
+        else:
+            self._mmap = None
+            self._mmap_view = None
+
+        self._tensors: Dict[str, "torch.Tensor"] = {}
         self._gpu_buffer_indices: Dict[str, int] = {}
         self._gpu_pool = None
 
@@ -85,21 +133,32 @@ class UnifiedSafetensorsLoader:
         if self.low_memory:
             # Streaming mode: read header only
             self._header, self._header_size = self._read_header()
-            self._file = None # Opened lazily to support multiprocessing DataLoader
+            self._file = None  # Opened lazily to support multiprocessing DataLoader
             self._all_keys = [k for k in self._header.keys() if k != "__metadata__"]
             # Extract metadata from header (safetensors stores it under __metadata__ key)
             self._metadata = self._header.get("__metadata__", {})
-            logging_utils.verbose(f"Initialized Low-memory mode: parsed header of size {self._header_size} bytes.")
-            logging_utils.verbose(f"Found {len(self._all_keys)} tensors (streaming mode)")
+            logging_utils.verbose(
+                f"Initialized Low-memory mode: parsed header of size {self._header_size} bytes."
+            )
+            logging_utils.verbose(
+                f"Found {len(self._all_keys)} tensors (streaming mode)"
+            )
         else:
             # Standard mode: preload all tensors
             with safe_open(self.filename, framework="pt", device="cpu") as f:
                 self._metadata = f.metadata() or {}
                 self._all_keys = list(f.keys())
-                logging_utils.normal(f"Loading {len(self._all_keys)} tensors from source file...")
+                logging_utils.normal(
+                    f"Loading {len(self._all_keys)} tensors from source file..."
+                )
                 try:
                     from tqdm import tqdm
-                    iterator = tqdm(self._all_keys, desc="Loading tensors", disable=not logger.isEnabledFor(logging_utils.NORMAL_LEVEL))
+
+                    iterator = tqdm(
+                        self._all_keys,
+                        desc="Loading tensors",
+                        disable=not logger.isEnabledFor(logging_utils.NORMAL_LEVEL),
+                    )
                 except ImportError:
                     iterator = self._all_keys
 
@@ -115,7 +174,7 @@ class UnifiedSafetensorsLoader:
     def __getstate__(self):
         """Make loader picklable for multiprocessing DataLoaders."""
         state = self.__dict__.copy()
-        state['_file'] = None
+        state["_file"] = None
         return state
 
     def __setstate__(self, state):
@@ -126,6 +185,10 @@ class UnifiedSafetensorsLoader:
         if self._file:
             self._file.close()
             self._file = None
+        # Release MMAP — critical on Windows where mapped file cannot be deleted
+        # while the mapping is alive.
+        self._mmap = None
+        self._mmap_view = None
         self._tensors.clear()
 
     def keys(self):
@@ -154,7 +217,7 @@ class UnifiedSafetensorsLoader:
         return len(self.get_shape(key))
 
     @logging_utils.log_debug
-    def get_tensor(self, key: str) -> 'torch.Tensor':
+    def get_tensor(self, key: str) -> "torch.Tensor":
         """Get a tensor by key.
 
         In standard mode, returns from cache.
@@ -175,7 +238,30 @@ class UnifiedSafetensorsLoader:
         offset_start, offset_end = metadata["data_offsets"]
 
         if offset_start != offset_end:
-            logging_utils.debug(f"Loading tensor '{key}' from offset {offset_start} to {offset_end} ({(offset_end - offset_start)} bytes)")
+            if self.use_mmap:
+                logging_utils.debug(f"Loading tensor '{key}' from MMAP")
+                tensor_view = self._mmap_view[
+                    self._header_size + 8 + offset_start : self._header_size
+                    + 8
+                    + offset_end
+                ]
+                import warnings
+
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore", message="The given buffer is not writable"
+                    )
+                    dtype = self._get_torch_dtype(metadata["dtype"])
+                    tensor = torch.frombuffer(tensor_view, dtype=dtype).view(
+                        metadata["shape"]
+                    )
+                    storage = tensor.untyped_storage()
+                    setattr(storage, "_uel_mmap_ref", self._mmap)
+                    return tensor
+
+            logging_utils.debug(
+                f"Loading tensor '{key}' from offset {offset_start} to {offset_end} ({(offset_end - offset_start)} bytes)"
+            )
             self._file.seek(self._header_size + 8 + offset_start)
             # Use bytearray to create a writable buffer, avoiding PyTorch warning
             # about non-writable tensors from read-only bytes.
@@ -220,9 +306,6 @@ class UnifiedSafetensorsLoader:
         else:
             byte_tensor = torch.frombuffer(tensor_bytes, dtype=torch.uint8)
 
-        if dtype_str in ["F8_E5M2", "F8_E4M3"]:
-            return self._convert_float8(byte_tensor, dtype_str, shape)
-
         return byte_tensor.view(dtype).reshape(shape)
 
     @staticmethod
@@ -240,28 +323,23 @@ class UnifiedSafetensorsLoader:
             "I8": torch.int8,
             "U8": torch.uint8,
             "BOOL": torch.bool,
+            "C64": torch.complex64,
         }
         if hasattr(torch, "float8_e5m2"):
             dtype_map["F8_E5M2"] = torch.float8_e5m2
         if hasattr(torch, "float8_e4m3fn"):
             dtype_map["F8_E4M3"] = torch.float8_e4m3fn
+        if hasattr(torch, "uint64"):
+            dtype_map["U64"] = torch.uint64
+        if hasattr(torch, "uint32"):
+            dtype_map["U32"] = torch.uint32
+        if hasattr(torch, "uint16"):
+            dtype_map["U16"] = torch.uint16
 
         dtype = dtype_map.get(dtype_str)
         if dtype is None:
             raise ValueError(f"Unsupported dtype: {dtype_str}")
         return dtype
-
-    @staticmethod
-    def _convert_float8(byte_tensor, dtype_str: str, shape: list):
-        """Convert bytes to float8 tensor."""
-        torch = _ensure_torch()
-        if dtype_str == "F8_E5M2" and hasattr(torch, "float8_e5m2"):
-            return byte_tensor.view(torch.float8_e5m2).reshape(shape)
-        elif dtype_str == "F8_E4M3" and hasattr(torch, "float8_e4m3fn"):
-            return byte_tensor.view(torch.float8_e4m3fn).reshape(shape)
-        else:
-            raise ValueError(f"Unsupported float8 type: {dtype_str}")
-
 
     def load_all(self):
         """Load all tensors as a dictionary.
@@ -286,7 +364,13 @@ class UnifiedSafetensorsLoader:
                 sd[key] = tensor
         return sd
 
-    def async_stream(self, keys: list, batch_size: int = 1, prefetch_batches: int = 2, pin_memory: bool = False):
+    def async_stream(
+        self,
+        keys: list,
+        batch_size: int = 1,
+        prefetch_batches: int = 2,
+        pin_memory: bool = False,
+    ):
         """Asynchronously stream tensors from disk.
 
         Args:
@@ -333,24 +417,30 @@ class UnifiedSafetensorsLoader:
                 num_buffers = (max_in_flight + max_workers) * 2 + 2
 
                 # Assign pool to instance to survive the generator lifetime
-                if not getattr(self, '_gpu_pool', None):
+                if not getattr(self, "_gpu_pool", None):
                     self._gpu_pool = GpuBufferPool(max_tensor_bytes, num_buffers)
 
                 pinned_pool = PinnedBufferPool(max_tensor_bytes, num_buffers)
                 cuda_stream = torch.cuda.Stream()
 
-                logging_utils.normal(f"Direct GPU pipeline initialized: {num_buffers} buffers, max {max_tensor_bytes / (1024**2):.1f}MB each (Total VRAM: {(num_buffers*max_tensor_bytes)/(1024**2):.1f}MB)")
+                logging_utils.normal(
+                    f"Direct GPU pipeline initialized: {num_buffers} buffers, max {max_tensor_bytes / (1024**2):.1f}MB each (Total VRAM: {(num_buffers * max_tensor_bytes) / (1024**2):.1f}MB)"
+                )
 
             except Exception as e:
-                logging_utils.warning(f"Failed to initialize direct GPU pipeline: {e}. Falling back.")
+                logging_utils.warning(
+                    f"Failed to initialize direct GPU pipeline: {e}. Falling back."
+                )
                 self.direct_gpu = False
                 pinned_pool = None
         elif self.direct_gpu:
-            logging_utils.warning("direct_gpu=True requested but CUDA is not available. Falling back to CPU.")
+            logging_utils.warning(
+                "direct_gpu=True requested but CUDA is not available. Falling back to CPU."
+            )
             self.direct_gpu = False
 
         def get_file_handle():
-            if not hasattr(thread_local, 'file'):
+            if not hasattr(thread_local, "file"):
                 thread_local.file = open(self.filename, "rb")
             return thread_local.file
 
@@ -373,15 +463,36 @@ class UnifiedSafetensorsLoader:
                         try:
                             # Read into pinned memory directly (Zero-Copy CPU path)
                             import ctypes
+
                             view = pinned_buf[:sz]
 
-                            # Create a ctypes c_uint8 array spanning the pinned buffer memory
-                            # This allows f.readinto() to write bytes directly to the torch tensor memory
-                            c_uint8_array = (ctypes.c_uint8 * sz).from_address(view.data_ptr())
+                            if self.use_mmap:
+                                tensor_view = self._mmap_view[
+                                    self._header_size
+                                    + 8
+                                    + offset_start : self._header_size + 8 + offset_end
+                                ]
+                                import warnings
 
-                            f = get_file_handle()
-                            f.seek(self._header_size + 8 + offset_start)
-                            f.readinto(c_uint8_array)
+                                with warnings.catch_warnings():
+                                    warnings.filterwarnings(
+                                        "ignore",
+                                        message="The given buffer is not writable",
+                                    )
+                                    mmap_tensor = torch.frombuffer(
+                                        tensor_view, dtype=torch.uint8
+                                    )
+                                    view.copy_(mmap_tensor)
+                            else:
+                                # Create a ctypes c_uint8 array spanning the pinned buffer memory
+                                # This allows f.readinto() to write bytes directly to the torch tensor memory
+                                c_uint8_array = (ctypes.c_uint8 * sz).from_address(
+                                    view.data_ptr()
+                                )
+
+                                f = get_file_handle()
+                                f.seek(self._header_size + 8 + offset_start)
+                                f.readinto(c_uint8_array)
 
                             gpu_view = gpu_buf[:sz]
 
@@ -410,10 +521,18 @@ class UnifiedSafetensorsLoader:
                 else:
                     # Standard CPU Path
                     if offset_start != offset_end:
-                        f = get_file_handle()
-                        f.seek(self._header_size + 8 + offset_start)
-                        tensor_bytes = bytearray(offset_end - offset_start)
-                        f.readinto(tensor_bytes)
+                        if self.use_mmap:
+                            tensor_view = self._mmap_view[
+                                self._header_size + 8 + offset_start : self._header_size
+                                + 8
+                                + offset_end
+                            ]
+                            tensor_bytes = bytearray(tensor_view)
+                        else:
+                            f = get_file_handle()
+                            f.seek(self._header_size + 8 + offset_start)
+                            tensor_bytes = bytearray(offset_end - offset_start)
+                            f.readinto(tensor_bytes)
                     else:
                         tensor_bytes = None
 
@@ -445,8 +564,8 @@ class UnifiedSafetensorsLoader:
                 while futures:
                     # Maintain order by taking the first future
                     f = futures.pop(0)
-                    result = f.result() # Blocks until this specific tensor is loaded
-                    q.put(result)       # Blocks if the consumption queue is full
+                    result = f.result()  # Blocks until this specific tensor is loaded
+                    q.put(result)  # Blocks if the consumption queue is full
 
                     # Submit next task if available
                     try:
@@ -455,62 +574,56 @@ class UnifiedSafetensorsLoader:
                     except StopIteration:
                         pass
 
-            q.put(None) # Sentinel
+            q.put(None)  # Sentinel
 
         producer_thread = threading.local()
         producer_thread = threading.Thread(target=_producer, daemon=True)
         producer_thread.start()
 
         batch = []
-        pending_pinned = [] # Track (event, buf_idx) to release later
+        pending_pinned = []  # Track (event, buf_idx) to release later
 
         while True:
             res = q.get()
             if res is None:
-                # Synchronize and cleanup any remaining buffers on exit
-                for ev, idx in pending_pinned:
-                    ev.synchronize()
-                    pinned_pool.release(idx)
                 if batch:
                     yield batch
                 break
 
             k, t, err, buf_idx, gpu_idx, event = res
             if err is not None and not isinstance(err, dict):
-                logging_utils.warning(f"Async load failed for {k}, falling back to sync: {err}")
+                logging_utils.warning(
+                    f"Async load failed for {k}, falling back to sync: {err}"
+                )
                 # Fallback synchronous load
                 try:
                     t = self.get_tensor(k)
                 except Exception as sync_err:
-                    logging_utils.error(f"Sync fallback also failed for {k}: {sync_err}")
+                    logging_utils.error(
+                        f"Sync fallback also failed for {k}: {sync_err}"
+                    )
                     raise sync_err
 
             if buf_idx is not None and event is not None:
-                # Don't block here! Yield the tensor with its event.
-                # Only release the PREVIOUS batch's buffers.
-                # This creates a sliding window of safety.
-                while len(pending_pinned) >= (max_in_flight + 1):
-                    ev, idx = pending_pinned.pop(0)
-                    ev.synchronize() # Wait only if we MUST reuse a buffer
-                    pinned_pool.release(idx)
+                # Synchronize before reshaping — GPU copy must complete before
+                # we hand the tensor to the caller or values will be garbage.
+                event.synchronize()
 
-                pending_pinned.append((event, buf_idx))
+                # Release the pinned staging buffer now that copy is complete
+                pinned_pool.release(buf_idx)
 
                 # Register GPU index for cleanup
                 self._gpu_buffer_indices[k] = gpu_idx
 
                 # Reshape GPU view to tensor
-                meta = err # we reused err for metadata in direct_gpu path
+                meta = err  # we reused err for metadata in direct_gpu path
                 dtype = self._get_torch_dtype(meta["dtype"])
                 shape = meta["shape"]
 
-                if meta["dtype"] in ["F8_E5M2", "F8_E4M3"]:
-                    t = self._convert_float8(t, meta["dtype"], shape)
-                else:
-                    t = t.view(dtype).reshape(shape)
+                t = t.view(dtype).reshape(shape)
 
             # Pin memory sequentially in the main thread to avoid OS-level lock contention
-            elif pin_memory and t.device.type == 'cpu':
+            elif pin_memory and t.device.type == "cpu":
                 try:
                     t = t.pin_memory()
                 except Exception as e:
@@ -520,6 +633,7 @@ class UnifiedSafetensorsLoader:
             if len(batch) == batch_size:
                 yield batch
                 batch = []
+
 
 # Backward compatibility alias
 MemoryEfficientSafeOpen = UnifiedSafetensorsLoader
