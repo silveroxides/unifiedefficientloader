@@ -157,6 +157,16 @@ ndim = loader.get_ndim("layer1.weight")  # e.g. 2
 
 ---
 
+### `get_dtype(key: str) -> torch.dtype`
+
+Returns the PyTorch dtype of the tensor without loading data.
+
+```python
+dtype = loader.get_dtype("layer1.weight")  # e.g. torch.float16
+```
+
+---
+
 ### `mark_processed(key: str)`
 
 Signals that a tensor has been consumed.

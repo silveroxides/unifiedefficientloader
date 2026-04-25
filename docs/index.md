@@ -7,6 +7,7 @@ A unified interface for memory-efficient loading of safetensors files, CPU/GPU p
 | Document | Description |
 |---|---|
 | [loader.md](loader.md) | `UnifiedSafetensorsLoader` — all modes and API reference |
+| [incremental_writer.md](incremental_writer.md) | `IncrementalSafetensorsWriter` — Memory-efficient async background writing |
 | [unified_data_loader.md](unified_data_loader.md) | `UnifiedDataLoader` — Threaded dataloader pipeline |
 | [mmap.md](mmap.md) | Zero-copy MMAP loading via the `uel` native extension |
 | [gpu.md](gpu.md) | Direct-to-GPU streaming pipeline (`direct_gpu`) |

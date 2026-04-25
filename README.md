@@ -34,6 +34,34 @@ with UnifiedSafetensorsLoader("model.safetensors", low_memory=True) as loader:
         loader.mark_processed(key) # Frees memory
 ```
 
+### Incremental Safetensors Writer
+
+You can incrementally stream and save tensors to disk using a pre-allocated "dummy" file and a background `ThreadPoolExecutor`. This ensures that you don't need to hold the entire output model in memory, completely eliminating massive RAM spikes during saving.
+
+```python
+from unifiedefficientloader import UnifiedSafetensorsLoader, IncrementalSafetensorsWriter
+
+loader = UnifiedSafetensorsLoader("source_model.safetensors", low_memory=True)
+
+# 1. Initialize with an optional metadata dictionary
+# max_header_bytes defaults to 1MB, which is plenty for >10,000 tensors.
+writer = IncrementalSafetensorsWriter("merged_or_quantized.safetensors", metadata=loader.metadata())
+
+# 2. Stream tensors into the file
+with writer:
+    for key in loader.keys():
+        t = loader.get_tensor(key)           # 1. Loader -> Memory
+        gpu_t = t.to("cuda")                 # 2. Memory -> GPU
+        del t                                # <-- Explicit cleanup
+        
+        out_gpu_t = custom_quantize(gpu_t)   # 3. Process on GPU
+        out_t = out_gpu_t.cpu()              # 4. GPU -> Memory
+        del gpu_t, out_gpu_t                 # <-- Explicit cleanup
+        
+        writer.write(key, out_t)             # 5. Memory -> File queue
+        del out_t                            # <-- Explicit cleanup
+```
+
 ### Loading Specific Tensors Dynamically (Header Analysis)
 
 You can analyze the file's header without loading the entire multi-gigabyte safetensors file into memory. This allows you to locate specific data (like embedded JSON dictionaries stored as `uint8` tensors) and load *only* those specific tensors directly from their file offsets.
