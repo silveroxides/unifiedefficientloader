@@ -48,13 +48,13 @@ with UnifiedSafetensorsLoader("model.safetensors", low_memory=True) as loader:
         key for key, info in loader._header.items()
         if isinstance(info, dict) and info.get("dtype") == "U8"
     ]
-    
+
     # 2. Load ONLY those specific tensors using their keys
     for key in uint8_tensor_keys:
-        # get_tensor dynamically reads only the bytes for this tensor 
+        # get_tensor dynamically reads only the bytes for this tensor
         # based on the offsets found in the header
         loaded_tensor = loader.get_tensor(key)
-        
+
         # 3. Decode the uint8 tensor back into a Python dictionary
         extracted_dict = tensor_to_dict(loaded_tensor)
         print(f"Decoded {key}:", extracted_dict)
@@ -69,24 +69,49 @@ from unifiedefficientloader import UnifiedSafetensorsLoader, transfer_to_gpu_pin
 
 with UnifiedSafetensorsLoader("model.safetensors", low_memory=True) as loader:
     keys_to_load = loader.keys()
-    
+
     # Create the continuous streaming generator
     # prefetch_batches controls how many batches to buffer in memory
     stream = loader.async_stream(
-        keys_to_load, 
-        batch_size=8, 
-        prefetch_batches=2, 
+        keys_to_load,
+        batch_size=8,
+        prefetch_batches=2,
         pin_memory=True
     )
-    
+
     # Iterate directly over the generator
     for batch in stream:
         for key, pinned_tensor in batch:
             # Transfer directly to GPU via DMA (pinning is already done)
             gpu_tensor = transfer_to_gpu_pinned(pinned_tensor, device="cuda")
-            
+
             # ... process gpu_tensor ...
             loader.mark_processed(key)
+```
+
+### Unified Data Loader
+
+A high-performance, threaded alternative to PyTorch's standard `DataLoader`. It eliminates multiprocessing IPC overhead and features a zero-copy pipeline capable of streaming batches directly from pinned CPU memory to VRAM (`direct_gpu=True`).
+
+```python
+from unifiedefficientloader import UnifiedDataLoader
+from torchvision import datasets, transforms
+
+dataset = datasets.FakeData(transform=transforms.ToTensor())
+
+# Replaces torch.utils.data.DataLoader
+# Pre-allocates pinned buffer pools and streams directly to GPU
+loader = UnifiedDataLoader(
+    dataset,
+    batch_size=32,
+    shuffle=True,
+    num_workers=4,
+    direct_gpu=True
+)
+
+for batch_image, batch_label in loader:
+    # batch is already on the GPU (device="cuda")
+    pass
 ```
 
 ### Direct-to-GPU Streaming (Zero-Copy)
