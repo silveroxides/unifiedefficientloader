@@ -1,14 +1,17 @@
 # IncrementalSafetensorsWriter
 
-The `IncrementalSafetensorsWriter` is a memory-efficient safetensors writer that supports incremental streaming. It is designed to handle saving tensors to disk without holding the entire model in RAM, which is crucial for processing very large models (e.g., 50GB+) on hardware with limited memory.
+The `IncrementalSafetensorsWriter` is a memory-efficient safetensors writer that supports dynamic, incremental streaming. It acts as a "Dumb Sink" that writes tensors to disk dynamically using background threads. 
+
+By reserving a fixed-size block for the JSON header at the start of the file, it completely eliminates the need to pre-calculate all tensor shapes and offsets before writing. This allows you to process massive models (e.g., 50GB+) on hardware with limited memory using a simple stream-and-forget loop.
 
 ## Core Concepts
 
-Unlike standard `safetensors.torch.save_file` which requires all tensors to be passed in a single dictionary (resulting in massive RAM usage), `IncrementalSafetensorsWriter` uses a **three-phase** approach:
+Unlike standard `safetensors.torch.save_file` which requires all tensors to be passed in a single dictionary (resulting in massive RAM usage), incremental saving uses a **dynamic streaming** approach:
 
-1. **Manifest Registration**: Register the exact structure of the output file (tensor names, shapes, and dtypes) without providing the actual data yet.
-2. **Preallocation**: Generates the full Safetensors header, pads it to enforce strict 8-byte alignment, and creates a "dummy" file on disk of the exact final size using OS-level file truncation.
-3. **Background Streaming**: Submit tensors one by one using a background `ThreadPoolExecutor`. The tensor data is written directly to its pre-calculated offset on disk. Since the writing happens in the background, your main thread can immediately `del` the tensor to free RAM.
+1. **Header Reservation**: When the writer opens, it reserves a large, fixed-size block (default 1MB) at the beginning of the file. 
+2. **Dynamic Data Append**: As you call `write(name, tensor)`, the writer calculates the necessary offsets on the fly and immediately dispatches the bytes to a background thread to be written to the data section of the file.
+3. **Strict Memory Discipline**: The background thread explicitly calls `del tensor` internally immediately after the file write completes. If you drop your reference to the tensor, it will be garbage collected the moment it hits the disk.
+4. **Header Finalization**: When the writer is closed, it converts the collected manifest into JSON, pads it with spaces to exactly match the reserved block size, and writes it to the start of the file.
 
 ## Basic Usage
 
@@ -18,89 +21,70 @@ Unlike standard `safetensors.torch.save_file` which requires all tensors to be p
 import torch
 from unifiedefficientloader import IncrementalSafetensorsWriter
 
-# 1. Initialize with your desired output filename
+# 1. Initialize with an optional metadata dictionary
+# max_header_bytes defaults to 1MB, which is plenty for >10,000 tensors.
 writer = IncrementalSafetensorsWriter("output.safetensors", metadata={"version": "1.0"})
 
-# 2. Register your tensors (the Manifest)
-writer.register_tensor("layer.0.weight", shape=(1024, 1024), dtype=torch.float16)
-writer.register_tensor("layer.0.bias", shape=(1024,), dtype=torch.float16)
-
-# 3. Preallocate the dummy file on disk
-writer.preallocate()
-
-# 4. Stream tensors into the file
+# 2. Stream tensors into the file
 with writer:
     # Generate or process your tensor...
     w = torch.randn((1024, 1024), dtype=torch.float16)
     
     # Hand off to the background thread pool
-    writer.write_tensor("layer.0.weight", w)
+    writer.write("layer.0.weight", w)
     
     # Immediately release from RAM!
     del w 
     
     # Continue streaming the rest...
     b = torch.zeros((1024,), dtype=torch.float16)
-    writer.write_tensor("layer.0.bias", b)
+    writer.write("layer.0.bias", b)
     del b
 ```
 
-## Cloning an Existing Model Structure
+## Transforming an Existing Model Structure
 
-If you are processing a model (e.g., quantizing or merging), you can clone the structure of the input model by iterating through its keys and registering them with the writer.
+If you are processing a model (e.g., quantizing or merging), you simply iterate through the source model and write the transformed tensors directly to the writer.
 
 ```python
 from unifiedefficientloader import UnifiedSafetensorsLoader, IncrementalSafetensorsWriter
 
 loader = UnifiedSafetensorsLoader("source.safetensors", low_memory=True)
+
+# Preserve metadata from the source
 writer = IncrementalSafetensorsWriter("quantized.safetensors", metadata=loader.metadata())
 
-# Register every tensor from the source
-for key in loader.keys():
-    writer.register_tensor(
-        key, 
-        shape=loader.get_shape(key), 
-        dtype=loader.get_dtype(key)
-    )
-
-# Optional: Add any NEW tensors to the manifest (e.g., quantization scales)
-writer.register_tensor("layer.0.scale", shape=(128,), dtype=torch.float32)
-
-writer.preallocate()
-
+# The Streaming Lifecycle Loop
 with writer:
     for key in loader.keys():
-        tensor = loader.get_tensor(key)
+        src_t = loader.get_tensor(key)                # 1. Loader -> Memory
+        gpu_t = src_t.to("cuda")                      # 2. Memory -> GPU
+        del src_t                                     # <--- Clean up Step 1
         
-        # ... perform arbitrary logic ...
-        quantized_tensor = my_quantize_func(tensor)
+        out_gpu_t = my_quantize_func(gpu_t)           # 3. Process on GPU
+        out_t = out_gpu_t.cpu()                       # 4. GPU -> Memory
+        del gpu_t, out_gpu_t                          # <--- Clean up Steps 2 & 3
         
-        # Write back to disk
-        writer.write_tensor(key, quantized_tensor)
+        writer.write(key, out_t)                      # 5. Memory -> Writer Queue
+        del out_t                                     # <--- Clean up Step 4
         
-        # Important: Free memory immediately
-        del tensor, quantized_tensor
+    # Write any new tensors we generated (e.g., quantization scales)
+    scale_tensor = torch.ones((128,), dtype=torch.float32)
+    writer.write("layer.0.scale", scale_tensor)
+    del scale_tensor
 ```
 
 ## API Reference
 
-### `IncrementalSafetensorsWriter(filename: str, metadata: dict = None, max_workers: int = 4)`
+### `IncrementalSafetensorsWriter(filename: str, metadata: dict = None, max_header_bytes: int = 1048576, max_workers: int = 4)`
 - `filename`: Target path for the `.safetensors` file.
 - `metadata`: Optional dictionary to be serialized into the `__metadata__` header property.
+- `max_header_bytes`: Bytes to reserve at the start of the file for the JSON header. It must be large enough to hold all tensor names, shapes, and offsets. 1MB (1048576) is typically enough for 10,000+ tensors. The writer will automatically enforce 8-byte alignment.
 - `max_workers`: Number of background threads to use for writing data. Defaults to 4.
 
-### `register_tensor(name: str, shape: tuple, dtype)`
-Registers a single tensor.
-- `name`: Tensor key name in the safetensors file.
-- `shape`: Tuple representing the tensor shape.
-- `dtype`: The PyTorch dtype (e.g., `torch.float16`) or a safetensors dtype string (e.g., `"F16"`).
+### `write(name: str, tensor: torch.Tensor)`
+Dynamically registers and dispatches a background write task.
+- `name`: The key name for the tensor in the safetensors file.
+- `tensor`: The PyTorch tensor data. Must be contiguous and on CPU.
 
-### `preallocate()`
-Calculates all offsets, constructs the JSON header, aligns the data block to an 8-byte boundary, and creates the full-size "dummy" file on disk using `os.truncate()`. Must be called before entering the context manager or writing tensors.
-
-### `write_tensor(name: str, tensor: torch.Tensor)`
-Dispatches a background write task.
-- `name`: The registered tensor name.
-- `tensor`: The PyTorch tensor data. Must be contiguous, on CPU, and strictly match the registered shape and dtype.
-
-**Important**: The `write_tensor` method blocks via a semaphore if the background threads are overwhelmed. This acts as backpressure to prevent your quantization/generation loop from out-pacing disk speeds and causing an Out-Of-Memory (OOM) error.
+**Important**: The `write` method blocks via a semaphore if the background threads are overwhelmed. This acts as backpressure to prevent your quantization/generation loop from out-pacing disk speeds and causing an Out-Of-Memory (OOM) error. The background worker explicitly calls `del tensor` internally immediately after the file write completes.
