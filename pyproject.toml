@@ -10,7 +10,7 @@ readme = "README.md"
 authors = [
   { name="silveroxides" }
 ]
-license = "MIT"
+license = { file = "LICENSE" }
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
