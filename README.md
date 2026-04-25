@@ -36,30 +36,24 @@ with UnifiedSafetensorsLoader("model.safetensors", low_memory=True) as loader:
 
 ### Incremental Safetensors Writer
 
-You can incrementally stream and save tensors to disk using a pre-allocated "dummy" file and a background `ThreadPoolExecutor`. This ensures that you don't need to hold the entire output model in memory, completely eliminating massive RAM spikes during saving.
 
 ```python
 from unifiedefficientloader import UnifiedSafetensorsLoader, IncrementalSafetensorsWriter
 
-loader = UnifiedSafetensorsLoader("source_model.safetensors", low_memory=True)
+# Initialize Writer
+writer = IncrementalSafetensorsWriter(output_path, metadata=metadata)
+writer.__enter__()
 
-# 1. Initialize with an optional metadata dictionary
-# max_header_bytes defaults to 1MB, which is plenty for >10,000 tensors.
-writer = IncrementalSafetensorsWriter("merged_or_quantized.safetensors", metadata=loader.metadata())
-
-# 2. Stream tensors into the file
-with writer:
+# Load model tensors and process them.
+with UnifiedSafetensorsLoader("model.safetensors", low_memory=True) as loader:
     for key in loader.keys():
-        t = loader.get_tensor(key)           # 1. Loader -> Memory
-        gpu_t = t.to("cuda")                 # 2. Memory -> GPU
-        del t                                # <-- Explicit cleanup
-        
-        out_gpu_t = custom_quantize(gpu_t)   # 3. Process on GPU
-        out_t = out_gpu_t.cpu()              # 4. GPU -> Memory
-        del gpu_t, out_gpu_t                 # <-- Explicit cleanup
-        
-        writer.write(key, out_t)             # 5. Memory -> File queue
-        del out_t                            # <-- Explicit cleanup
+        tensor = loader.get_tensor(key)
+        # Process tensor...
+        writer.write(key, tensor)
+        del tensor
+        loader.mark_processed(key) # Frees memory
+
+
 ```
 
 ### Loading Specific Tensors Dynamically (Header Analysis)
