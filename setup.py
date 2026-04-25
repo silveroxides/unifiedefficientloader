@@ -37,9 +37,26 @@ class BuildUELExtension(build_ext):
 
     Triggered by:
         python setup.py build_ext
+        python setup.py build_ext --force
         python setup.py bdist_wheel
+        python setup.py bdist_wheel --force
+        python setup.py build_ext bdist_wheel --force
         pip install .
     """
+
+    # Expose --force / -f as a native option on this command so setuptools
+    # parses it correctly regardless of which command the flag is attached to.
+    user_options = build_ext.user_options + [
+        ("force", "f", "forcibly rebuild C extension (ignore timestamps)"),
+    ]
+    boolean_options = build_ext.boolean_options + ["force"]
+
+    def initialize_options(self):
+        super().initialize_options()
+        self.force = False
+
+    def finalize_options(self):
+        super().finalize_options()
 
     def run(self):
         system = platform.system()
@@ -259,7 +276,10 @@ class BdistWheel(wheel.bdist_wheel.bdist_wheel):
 
     def run(self):
         if self.force:
-            build_ext_cmd = self.get_finalized_command("build_ext")
+            # Inject force onto the build_ext command object before the build
+            # chain runs. get_command_obj returns the unfinalized instance so
+            # the flag is respected when build_ext.finalize_options() fires.
+            build_ext_cmd = self.distribution.get_command_obj("build_ext")
             build_ext_cmd.force = True
         super().run()
 

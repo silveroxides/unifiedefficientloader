@@ -53,23 +53,22 @@ with UnifiedSafetensorsLoader("model.safetensors", low_memory=True, direct_gpu=T
 
 ## Buffer pool sizing
 
-Pool sizes are calculated automatically based on the largest tensor in the key list:
+Pool sizes are calculated automatically from `prefetch_batches` and `num_workers`:
 
 ```
-num_buffers = (max_in_flight + max_workers) * 2 + 2
+num_buffers = prefetch_batches + num_workers + 1
+buffer_size = max_tensor_bytes * batch_size
 ```
 
-Where:
-- `max_workers = min(16, max(4, batch_size))`
-- `max_in_flight = max(max_workers, prefetch_batches * batch_size)`
-
-Total VRAM consumed = `num_buffers × max_tensor_bytes`. Logged at startup:
+Total VRAM consumed = `num_buffers × buffer_size`. Logged at startup:
 
 ```
-Direct GPU pipeline initialized: 98 buffers, max 512.0MB each (Total VRAM: 50176.0MB)
+Direct GPU pool: 6 slots x 512.0 MB each (VRAM budget: 3072.0 MB)
 ```
 
-Ensure your GPU has sufficient headroom before the model weights are loaded into it.
+The pool is intentionally bounded — it holds only the in-flight pipeline window,
+not the full dataset. Ensure your GPU has sufficient headroom before model weights
+are loaded.
 
 ## Memory cleanup
 
@@ -92,10 +91,26 @@ Forgetting `mark_processed` will exhaust the pool and stall the pipeline.
 | Pool init failure | Falls back to CPU streaming, warning logged |
 | Worker read failure | Falls back to synchronous `get_tensor()` for that key |
 
-## Comparison
+## Performance characteristics
 
-| Mode | RAM used | VRAM used | GPU transfer |
-|---|---|---|---|
-| Standard IO + `transfer_to_gpu_pinned` | Full model | Full model | Explicit per-tensor |
-| `async_stream(pin_memory=True)` | Streaming | Full model | Pinned DMA per tensor |
-| `direct_gpu=True` | Pool only | Pool + model | Async DMA, overlapped with disk I/O |
+Observed throughput order from fastest to slowest when `uel` native extension
+is present:
+
+```
+async_stream (use_mmap=True)  >  async_stream  >  direct_gpu
+```
+
+`async_stream + use_mmap=True` eliminates disk read overhead entirely — the OS
+page cache serves tensors directly from mapped virtual memory with no file IO
+after the first pass. `async_stream` without mmap is the next fastest because
+it keeps pure CPU-side copies minimal. `direct_gpu=True` adds PCIe transfer
+overhead per batch on top of disk IO, which only pays off when tensors are large
+enough that the async DMA overlap meaningfully hides PCIe latency.
+
+| Mode | RAM used | VRAM used | GPU transfer | Notes |
+|---|---|---|---|---|
+| Standard IO + `transfer_to_gpu_pinned` | Full model | Full model | Explicit per-tensor | Baseline; no streaming |
+| `async_stream(pin_memory=True)` | Pool only | Full model | Pinned DMA per tensor | Good general-purpose choice |
+| `async_stream` + `use_mmap=True` | OS page cache | Full model | Pinned DMA per tensor | Fastest when uel available |
+| `direct_gpu=True` | Pool only | Pool + model | Async DMA from pinned buf | Best for very large tensors on PCIe-bottlenecked systems |
+| `direct_gpu=True` + `use_mmap=True` | OS page cache | Pool + model | Async DMA from mapped pages | Maximum pipeline overlap when uel available |

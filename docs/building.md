@@ -31,7 +31,7 @@ pip install dist/unifiedefficientloader-*.whl --force-reinstall
 ### Force rebuild (ignore source timestamps)
 
 ```bash
-python setup.py build_ext bdist_wheel --force
+python setup.py build_ext --force bdist_wheel
 ```
 
 ### Build extension only (for local development)

@@ -16,15 +16,19 @@ class PinnedBufferPool:
         self.size_bytes = size_bytes
         self.num_buffers = num_buffers
 
-        # Determine whether to use PyTorch pinned memory or uel HostBuffer
+        # Determine whether to use PyTorch pinned memory or uel HostBuffer.
+        # Probe with a 1-byte allocation to confirm the C lib and CUDA device
+        # are fully initialized before committing. Falls back silently on any failure.
         self.use_uel = False
         try:
             from .uel import control, host_buffer, torch as uel_torch
             if control.lib is not None:
+                probe = host_buffer.HostBuffer(1)
+                del probe
                 self.use_uel = True
                 self._uel_host_buffer = host_buffer
                 self._uel_torch = uel_torch
-        except ImportError:
+        except Exception:
             pass
 
         logging_utils.verbose(f"Initializing PinnedBufferPool: {num_buffers} buffers of {size_bytes / (1024**2):.2f} MB each. Use UEL: {self.use_uel}")
