@@ -21,6 +21,7 @@ def check_dependencies(*packages):
 check_dependencies("torch")
 
 from .memory_efficient_loader import UnifiedSafetensorsLoader, MemoryEfficientSafeOpen
+from .gguf_loader import UnifiedGGUFLoader
 from .tensor_utils import dict_to_tensor, tensor_to_dict
 from .pinned_transfer import transfer_to_gpu_pinned, set_verbose, get_pinned_transfer_stats, reset_pinned_transfer_stats
 from .gpu_buffer_pool import GpuBufferPool
@@ -43,6 +44,7 @@ from .logging_utils import (
 __all__ = [
     "UnifiedSafetensorsLoader",
     "MemoryEfficientSafeOpen",
+    "UnifiedGGUFLoader",
     "dict_to_tensor",
     "tensor_to_dict",
     "transfer_to_gpu_pinned",
