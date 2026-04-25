@@ -34,6 +34,40 @@ with UnifiedSafetensorsLoader("model.safetensors", low_memory=True) as loader:
         loader.mark_processed(key) # Frees memory
 ```
 
+### Incremental Safetensors Writer
+
+You can incrementally stream and save tensors to disk using a pre-allocated "dummy" file and a background `ThreadPoolExecutor`. This ensures that you don't need to hold the entire output model in memory, completely eliminating massive RAM spikes during saving.
+
+```python
+from unifiedefficientloader import UnifiedSafetensorsLoader, IncrementalSafetensorsWriter
+
+loader = UnifiedSafetensorsLoader("source_model.safetensors")
+
+# 1. Start with the Structural Blueprint
+writer = IncrementalSafetensorsWriter("merged_or_quantized.safetensors", metadata=loader.metadata())
+writer.register_template(loader)
+
+# (Optional) Add brand new tensors to the manifest here
+# writer.register_tensor("new.scale.weight", (128,), torch.float16)
+
+# 2. Reserve File Space (Writes header, truncates file space instantly on disk)
+writer.preallocate() 
+
+# 3. Stream Data Back
+with writer:
+    for key in loader.keys():
+        t = loader.get_tensor(key)
+        
+        # Perform your merging, quantization, scaling, etc.
+        out_t = custom_merge_or_quantize_op(t)
+        
+        # Dispatch to background thread pool for saving
+        writer.write_tensor(key, out_t)
+        
+        # Immediate memory release
+        del t, out_t 
+```
+
 ### Loading Specific Tensors Dynamically (Header Analysis)
 
 You can analyze the file's header without loading the entire multi-gigabyte safetensors file into memory. This allows you to locate specific data (like embedded JSON dictionaries stored as `uint8` tensors) and load *only* those specific tensors directly from their file offsets.
