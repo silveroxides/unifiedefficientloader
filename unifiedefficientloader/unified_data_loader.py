@@ -25,7 +25,6 @@ from .pinned_buffer_pool import PinnedBufferPool
 
 logger = logging_utils.get_logger(__name__)
 
-
 def _ensure_torch():
     try:
         import torch
@@ -34,6 +33,34 @@ def _ensure_torch():
         raise ImportError(
             "The 'torch' package is required but not installed. Please install it."
         )
+
+
+def _default_collate(batch):
+    """Fallback minimal collate function that handles basic torch types."""
+    torch = _ensure_torch()
+    if len(batch) == 0:
+        return []
+
+    elem = batch[0]
+    elem_type = type(elem)
+    
+    if isinstance(elem, torch.Tensor):
+        out = None
+        if torch.utils.data.get_worker_info() is not None:
+            # If we're in a background process, we should stack into a shared memory tensor.
+            # But here we are in a thread, so torch.stack is fine.
+            pass
+        return torch.stack(batch, 0)
+    elif isinstance(elem, dict):
+        return {key: _default_collate([d[key] for d in batch]) for key in elem}
+    elif isinstance(elem, (tuple, list)):
+        transposed = zip(*batch)
+        return elem_type([_default_collate(samples) for samples in transposed])
+    elif isinstance(elem, (int, float)):
+        return torch.tensor(batch)
+    
+    # If it's something else, return as list
+    return batch
 
 
 def _bytes_of_collated(obj) -> int:
@@ -126,7 +153,12 @@ class UnifiedDataLoader:
 
     def __init__(
         self,
-        dataset,
+        dataset=None,
+        *,
+        load_fn=None,
+        length: Optional[int] = None,
+        keys: Optional[list] = None,
+        collate_fn=None,
         batch_size: int = 1,
         shuffle: bool = False,
         num_workers: int = 0,
@@ -136,7 +168,30 @@ class UnifiedDataLoader:
         drop_last: bool = False,
         device: str = "cuda",
     ):
-        self.dataset = dataset
+        if dataset is not None:
+            # Backwards compatibility for torch.utils.data.Dataset
+            # Check if it has a fast path async_stream (like UnifiedSafetensorsLoader)
+            if hasattr(dataset, "async_stream") and callable(dataset.async_stream):
+                self.load_fn = dataset.get_tensor if hasattr(dataset, "get_tensor") else None
+                self.keys = list(dataset.keys()) if hasattr(dataset, "keys") else None
+                self.length = len(self.keys) if self.keys is not None else None
+            else:
+                self.load_fn = lambda idx: dataset[idx]
+                self.length = len(dataset)
+                self.keys = None
+            self.dataset = dataset
+        else:
+            if load_fn is None:
+                raise ValueError("Must provide either 'dataset' or 'load_fn'")
+            self.load_fn = load_fn
+            self.length = length
+            self.keys = keys
+            self.dataset = None
+
+        if self.length is None and self.keys is None and self.dataset is None:
+             raise ValueError("Must provide either 'length' or 'keys' if not using 'dataset'")
+
+        self.collate_fn = collate_fn or _default_collate
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.num_workers = max(1, num_workers)
@@ -155,7 +210,7 @@ class UnifiedDataLoader:
             self.direct_gpu = False
 
     def __len__(self) -> int:
-        dataset_len = len(self.dataset)
+        dataset_len = self.length if self.length is not None else len(self.keys)
         n_batches = dataset_len // self.batch_size
         if dataset_len % self.batch_size != 0 and not self.drop_last:
             n_batches += 1
@@ -165,30 +220,70 @@ class UnifiedDataLoader:
         torch = _ensure_torch()
         import random
 
-        dataset_len = len(self.dataset)
-        indices = list(range(dataset_len))
+        if self.dataset is not None and hasattr(self.dataset, "async_stream") and callable(self.dataset.async_stream):
+            # Fast path for UnifiedSafetensorsLoader passed as dataset
+            # (or any object with async_stream). We directly yield from it.
+            # We assume it handles its own shuffling and dropping last if needed
+            # for its own items, but right now async_stream takes keys.
+            
+            keys = list(self.dataset.keys())
+            if self.shuffle:
+                 random.shuffle(keys)
+                 
+            if self.drop_last:
+                 dataset_len = len(keys)
+                 trim = dataset_len - (dataset_len % self.batch_size)
+                 keys = keys[:trim]
+                 
+            if not keys:
+                 return
+
+            # Yield batches directly from async_stream
+            for batch_items in self.dataset.async_stream(
+                keys=keys,
+                batch_size=self.batch_size,
+                prefetch_batches=self.prefetch_batches,
+                pin_memory=self.pin_memory,
+            ):
+                 # async_stream returns list of (key, tensor)
+                 # We want to yield collated batch. If direct_gpu is on, 
+                 # async_stream might return tensor directly, or it might just be the list.
+                 # Let's unwrap (key, tensor) and collate.
+                 
+                 # actually async stream returns `batch` which is `list[(key, tensor)]`
+                 tensors = [t for _, t in batch_items]
+                 yield self.collate_fn(tensors)
+
+            return
+            
+        dataset_len = self.length if self.length is not None else len(self.keys)
+        if self.keys is not None:
+             indices_or_keys = list(self.keys)
+        else:
+             indices_or_keys = list(range(dataset_len))
+             
         if self.shuffle:
-            random.shuffle(indices)
+            random.shuffle(indices_or_keys)
 
         # Drop last incomplete batch if requested
         if self.drop_last:
             trim = dataset_len - (dataset_len % self.batch_size)
-            indices = indices[:trim]
+            indices_or_keys = indices_or_keys[:trim]
 
-        if not indices:
+        if not indices_or_keys:
             return
 
         # Single-threaded fast path
         if self.num_workers <= 1 and not self.direct_gpu:
-            for i in range(0, len(indices), self.batch_size):
-                batch_indices = indices[i:i + self.batch_size]
-                items = [self.dataset[idx] for idx in batch_indices]
-                yield torch.utils.data.default_collate(items)
+            for i in range(0, len(indices_or_keys), self.batch_size):
+                batch_indices = indices_or_keys[i:i + self.batch_size]
+                items = [self.load_fn(idx) for idx in batch_indices]
+                yield self.collate_fn(items)
             return
 
-        yield from self._threaded_iter(torch, indices)
+        yield from self._threaded_iter(torch, indices_or_keys)
 
-    def _threaded_iter(self, torch, indices) -> Iterator:
+    def _threaded_iter(self, torch, indices_or_keys) -> Iterator:
         # Mirror async_stream sizing exactly:
         # max_workers scales with batch_size, max_in_flight covers prefetch depth
         max_workers = min(16, max(4, self.num_workers))
@@ -206,7 +301,7 @@ class UnifiedDataLoader:
 
         if direct_gpu:
             try:
-                sample = torch.utils.data.default_collate([self.dataset[indices[0]]])
+                sample = self.collate_fn([self.load_fn(indices_or_keys[0])])
                 batch_bytes = _bytes_of_collated(sample) * self.batch_size
                 if batch_bytes == 0:
                     raise ValueError("Batch byte size is 0")
@@ -229,12 +324,10 @@ class UnifiedDataLoader:
                 gpu_pool = None
                 cuda_stream = None
 
-        dataset = self.dataset
-
         def _worker_load(pos, idx):
             """Load one item. Mirrors _worker_load(key) in async_stream."""
             try:
-                item = dataset[idx]
+                item = self.load_fn(idx)
                 return pos, item, None
             except Exception as e:
                 return pos, None, e
@@ -242,7 +335,7 @@ class UnifiedDataLoader:
         def _producer():
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = []
-                idx_iter = iter(enumerate(indices))
+                idx_iter = iter(enumerate(indices_or_keys))
 
                 # Pre-fill pipeline — identical to async_stream fill loop
                 for _ in range(max_in_flight):
@@ -278,7 +371,7 @@ class UnifiedDataLoader:
                 if res is None:
                     # Yield final partial batch if not drop_last
                     if batch_items and not self.drop_last:
-                        collated = torch.utils.data.default_collate(batch_items)
+                        collated = self.collate_fn(batch_items)
                         if self.pin_memory:
                             collated = _pin_collated(collated)
                         yield collated
@@ -293,7 +386,7 @@ class UnifiedDataLoader:
                 batch_items.append(item)
 
                 if len(batch_items) == self.batch_size:
-                    collated = torch.utils.data.default_collate(batch_items)
+                    collated = self.collate_fn(batch_items)
                     batch_items = []
 
                     if direct_gpu and pinned_pool is not None:

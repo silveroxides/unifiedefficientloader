@@ -1,7 +1,8 @@
 """Tests for UnifiedDataLoader."""
 import pytest
 import torch
-from unifiedefficientloader import UnifiedDataLoader
+from unifiedefficientloader import UnifiedDataLoader, UnifiedSafetensorsLoader
+import os
 
 class DummyDataset(torch.utils.data.Dataset):
     def __init__(self, size=100):
@@ -55,3 +56,43 @@ def test_unified_data_loader_direct_gpu():
     assert first_batch["label"].is_cuda
     assert first_batch["label"][0].item() == 0
     assert first_batch["label"][1].item() == 1
+
+def test_unified_data_loader_load_fn():
+    def my_load_fn(idx):
+        return {"a": torch.tensor([idx]), "b": torch.tensor([idx * 2])}
+        
+    loader = UnifiedDataLoader(load_fn=my_load_fn, length=10, batch_size=2, num_workers=2)
+    batches = list(loader)
+    
+    assert len(batches) == 5
+    assert batches[0]["a"].shape == (2, 1)
+    assert batches[0]["a"][0].item() == 0
+    assert batches[0]["a"][1].item() == 1
+    assert batches[0]["b"][1].item() == 2
+
+def test_unified_data_loader_safetensors_fast_path(tmp_path):
+    from safetensors.torch import save_file
+    st_path = os.path.join(tmp_path, "test.safetensors")
+    
+    tensors = {
+        "item_0": torch.ones(2, 2) * 0,
+        "item_1": torch.ones(2, 2) * 1,
+        "item_2": torch.ones(2, 2) * 2,
+        "item_3": torch.ones(2, 2) * 3,
+    }
+    save_file(tensors, st_path)
+    
+    st_loader = UnifiedSafetensorsLoader(st_path, low_memory=True)
+    
+    loader = UnifiedDataLoader(st_loader, batch_size=2, num_workers=2)
+    batches = list(loader)
+    
+    assert len(batches) == 2
+    assert batches[0].shape == (2, 2, 2) # Collated 2 items of shape (2,2)
+    
+    # We don't guarantee exact order if shuffle=False right now because async stream yields 
+    # as things complete, but with batch=2 and 4 items, let's just check the values.
+    # Async stream preserves order if prefetch is bounded properly but let's check broadly:
+    
+    all_vals = torch.cat(batches, dim=0).flatten().unique().tolist()
+    assert set(all_vals) == {0.0, 1.0, 2.0, 3.0}

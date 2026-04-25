@@ -3,6 +3,7 @@ import gc
 import logging
 import os
 import shutil
+import threading
 import time
 import warnings
 
@@ -101,28 +102,38 @@ class DiskDatasetSafetensors(Dataset):
     """
     Loads tensors from a single .safetensors file via UnifiedSafetensorsLoader
     in low-memory streaming mode. One tensor read per __getitem__. No bulk preload.
-    Loader is opened lazily per thread — safe for ThreadPoolExecutor workers.
+    Uses threading.local() so each worker thread opens its own file handle —
+    no contention on seek/read across concurrent workers.
     """
     def __init__(self, n_items, size, use_mmap=False):
         self.n_items = n_items
         self.size = size
         self.use_mmap = use_mmap
-        self._loader = None
+        self._thread_local = threading.local()
+        self._all_loaders_lock = threading.Lock()
+        self._all_loaders = []
 
     def _get_loader(self):
-        if self._loader is None:
-            self._loader = UnifiedSafetensorsLoader(
+        if not hasattr(self._thread_local, "loader") or self._thread_local.loader is None:
+            loader = UnifiedSafetensorsLoader(
                 SAFETENSORS_PATH,
                 low_memory=True,
                 use_mmap=self.use_mmap,
             )
-        return self._loader
+            self._thread_local.loader = loader
+            with self._all_loaders_lock:
+                self._all_loaders.append(loader)
+        return self._thread_local.loader
 
     def close(self):
-        """Explicitly release the file handle. Call before cleanup on Windows."""
-        if self._loader is not None:
-            self._loader.close()
-            self._loader = None
+        """Close all per-thread loaders. Call before cleanup on Windows."""
+        with self._all_loaders_lock:
+            for loader in self._all_loaders:
+                try:
+                    loader.close()
+                except Exception:
+                    pass
+            self._all_loaders.clear()
 
     def __len__(self):
         return self.size
@@ -134,12 +145,18 @@ class DiskDatasetSafetensors(Dataset):
         return {"image": tensor.clone(), "label": torch.tensor(idx % self.n_items, dtype=torch.long)}
 
     def __getstate__(self):
+        # threading.local is not picklable — strip it for multiprocessing safety
         state = self.__dict__.copy()
-        state["_loader"] = None
+        state["_thread_local"] = None
+        state["_all_loaders"] = []
+        state["_all_loaders_lock"] = None
         return state
 
     def __setstate__(self, state):
         self.__dict__.update(state)
+        self._thread_local = threading.local()
+        self._all_loaders = []
+        self._all_loaders_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
