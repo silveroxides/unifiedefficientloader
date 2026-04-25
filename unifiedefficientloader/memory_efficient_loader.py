@@ -11,6 +11,7 @@ import struct
 from typing import Dict, Optional, Tuple
 
 from . import logging_utils
+from .tensor_utils import st_to_torch_dtype
 
 logger = logging_utils.get_logger(__name__)
 
@@ -216,6 +217,15 @@ class UnifiedSafetensorsLoader:
         """Get tensor ndim without loading tensor data."""
         return len(self.get_shape(key))
 
+    def get_dtype(self, key: str):
+        """Get tensor torch dtype without loading tensor data."""
+        if self.low_memory:
+            if key not in self._header:
+                raise KeyError(f"Tensor '{key}' not found in file")
+            return st_to_torch_dtype(self._header[key]["dtype"])
+        else:
+            return self._tensors[key].dtype
+
     @logging_utils.log_debug
     def get_tensor(self, key: str) -> "torch.Tensor":
         """Get a tensor by key.
@@ -251,7 +261,7 @@ class UnifiedSafetensorsLoader:
                     warnings.filterwarnings(
                         "ignore", message="The given buffer is not writable"
                     )
-                    dtype = self._get_torch_dtype(metadata["dtype"])
+                    dtype = st_to_torch_dtype(metadata["dtype"])
                     tensor = torch.frombuffer(tensor_view, dtype=dtype).view(
                         metadata["shape"]
                     )
@@ -299,7 +309,7 @@ class UnifiedSafetensorsLoader:
         torch = _ensure_torch()
         dtype_str = metadata["dtype"]
         shape = metadata["shape"]
-        dtype = self._get_torch_dtype(dtype_str)
+        dtype = st_to_torch_dtype(dtype_str)
 
         if tensor_bytes is None:
             byte_tensor = torch.empty(0, dtype=torch.uint8)
@@ -307,39 +317,6 @@ class UnifiedSafetensorsLoader:
             byte_tensor = torch.frombuffer(tensor_bytes, dtype=torch.uint8)
 
         return byte_tensor.view(dtype).reshape(shape)
-
-    @staticmethod
-    def _get_torch_dtype(dtype_str: str):
-        """Map safetensors dtype string to torch dtype."""
-        torch = _ensure_torch()
-        dtype_map = {
-            "F64": torch.float64,
-            "F32": torch.float32,
-            "F16": torch.float16,
-            "BF16": torch.bfloat16,
-            "I64": torch.int64,
-            "I32": torch.int32,
-            "I16": torch.int16,
-            "I8": torch.int8,
-            "U8": torch.uint8,
-            "BOOL": torch.bool,
-            "C64": torch.complex64,
-        }
-        if hasattr(torch, "float8_e5m2"):
-            dtype_map["F8_E5M2"] = torch.float8_e5m2
-        if hasattr(torch, "float8_e4m3fn"):
-            dtype_map["F8_E4M3"] = torch.float8_e4m3fn
-        if hasattr(torch, "uint64"):
-            dtype_map["U64"] = torch.uint64
-        if hasattr(torch, "uint32"):
-            dtype_map["U32"] = torch.uint32
-        if hasattr(torch, "uint16"):
-            dtype_map["U16"] = torch.uint16
-
-        dtype = dtype_map.get(dtype_str)
-        if dtype is None:
-            raise ValueError(f"Unsupported dtype: {dtype_str}")
-        return dtype
 
     def load_all(self):
         """Load all tensors as a dictionary.
@@ -617,7 +594,7 @@ class UnifiedSafetensorsLoader:
 
                 # Reshape GPU view to tensor
                 meta = err  # we reused err for metadata in direct_gpu path
-                dtype = self._get_torch_dtype(meta["dtype"])
+                dtype = st_to_torch_dtype(meta["dtype"])
                 shape = meta["shape"]
 
                 t = t.view(dtype).reshape(shape)

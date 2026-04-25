@@ -13,6 +13,7 @@ import math
 from concurrent.futures import ThreadPoolExecutor
 
 from . import logging_utils
+from .tensor_utils import torch_to_st_dtype, get_dtype_size
 logger = logging_utils.get_logger(__name__)
 
 def _ensure_torch():
@@ -21,46 +22,6 @@ def _ensure_torch():
         return torch
     except ImportError:
         raise ImportError("The 'torch' package is required but not installed. Please install it.")
-
-def _torch_to_st_dtype(dtype) -> str:
-    torch = _ensure_torch()
-    mapping = {
-        torch.float64: "F64",
-        torch.float32: "F32",
-        torch.float16: "F16",
-        torch.bfloat16: "BF16",
-        torch.int64: "I64",
-        torch.int32: "I32",
-        torch.int16: "I16",
-        torch.int8: "I8",
-        torch.uint8: "U8",
-        torch.bool: "BOOL",
-        torch.complex64: "C64",
-    }
-    if hasattr(torch, "float8_e5m2"):
-        mapping[torch.float8_e5m2] = "F8_E5M2"
-    if hasattr(torch, "float8_e4m3fn"):
-        mapping[torch.float8_e4m3fn] = "F8_E4M3"
-    if hasattr(torch, "uint64"):
-        mapping[torch.uint64] = "U64"
-    if hasattr(torch, "uint32"):
-        mapping[torch.uint32] = "U32"
-    if hasattr(torch, "uint16"):
-        mapping[torch.uint16] = "U16"
-
-    if dtype in mapping:
-        return mapping[dtype]
-    raise ValueError(f"Unsupported torch dtype: {dtype}")
-
-def _get_dtype_size(st_dtype: str) -> int:
-    sizes = {
-        "F64": 8, "F32": 4, "F16": 2, "BF16": 2,
-        "I64": 8, "I32": 4, "I16": 2, "I8": 1, "U8": 1,
-        "U64": 8, "U32": 4, "U16": 2,
-        "BOOL": 1, "C64": 8,
-        "F8_E5M2": 1, "F8_E4M3": 1,
-    }
-    return sizes[st_dtype]
 
 class IncrementalSafetensorsWriter:
     """Memory-efficient safetensors writer supporting incremental streaming.
@@ -73,7 +34,8 @@ class IncrementalSafetensorsWriter:
 
     Usage:
         writer = IncrementalSafetensorsWriter("output.safetensors")
-        writer.register_template(loader)
+        for key in loader.keys():
+            writer.register_tensor(key, loader.get_shape(key), loader.get_dtype(key))
         writer.preallocate()
 
         with writer:
@@ -103,7 +65,7 @@ class IncrementalSafetensorsWriter:
 
         torch = _ensure_torch()
         if isinstance(dtype, torch.dtype):
-            st_dtype = _torch_to_st_dtype(dtype)
+            st_dtype = torch_to_st_dtype(dtype)
         elif isinstance(dtype, str):
             st_dtype = dtype
         else:
@@ -114,23 +76,6 @@ class IncrementalSafetensorsWriter:
             "shape": list(shape),
         }
         logging_utils.debug(f"Registered tensor {name}: {shape} {st_dtype}")
-
-    def register_template(self, loader):
-        """Clone the structure and metadata from a UnifiedSafetensorsLoader."""
-        if self._finalized:
-            raise RuntimeError("Cannot register templates after preallocate() has been called.")
-
-        if not self.metadata and loader.metadata():
-            self.metadata = loader.metadata().copy()
-
-        for key in loader.keys():
-            shape = loader.get_shape(key)
-            st_dtype = loader._header[key]["dtype"]
-            self._manifest[key] = {
-                "dtype": st_dtype,
-                "shape": list(shape),
-            }
-        logging_utils.verbose(f"Registered template with {len(loader.keys())} tensors.")
 
     @logging_utils.log_debug
     def preallocate(self):
@@ -151,7 +96,7 @@ class IncrementalSafetensorsWriter:
             shape = info["shape"]
 
             num_elements = math.prod(shape) if shape else 1
-            byte_size = num_elements * _get_dtype_size(st_dtype)
+            byte_size = num_elements * get_dtype_size(st_dtype)
 
             info["data_offsets"] = [current_offset, current_offset + byte_size]
             header_dict[key] = info
@@ -243,7 +188,7 @@ class IncrementalSafetensorsWriter:
                 f"Tensor '{name}' shape mismatch. Expected {expected_shape}, got {tensor.shape}"
             )
 
-        st_dtype = _torch_to_st_dtype(tensor.dtype)
+        st_dtype = torch_to_st_dtype(tensor.dtype)
         if st_dtype != info["dtype"]:
             raise ValueError(
                 f"Tensor '{name}' dtype mismatch. Expected {info['dtype']}, got {st_dtype}"

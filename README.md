@@ -43,17 +43,21 @@ from unifiedefficientloader import UnifiedSafetensorsLoader, IncrementalSafetens
 
 loader = UnifiedSafetensorsLoader("source_model.safetensors")
 
-# 1. Start with the Structural Blueprint
+# 1. Initialize with metadata from source
 writer = IncrementalSafetensorsWriter("merged_or_quantized.safetensors", metadata=loader.metadata())
-writer.register_template(loader)
 
-# (Optional) Add brand new tensors to the manifest here
-# writer.register_tensor("new.scale.weight", (128,), torch.float16)
+# 2. Register Tensors (Manual Orchestration)
+for key in loader.keys():
+    writer.register_tensor(
+        key, 
+        shape=loader.get_shape(key), 
+        dtype=loader.get_dtype(key)
+    )
 
-# 2. Reserve File Space (Writes header, truncates file space instantly on disk)
+# 3. Reserve File Space (Writes header, truncates file space instantly on disk)
 writer.preallocate() 
 
-# 3. Stream Data Back
+# 4. Stream Data Back
 with writer:
     for key in loader.keys():
         t = loader.get_tensor(key)
