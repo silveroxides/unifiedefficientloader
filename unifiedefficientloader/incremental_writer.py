@@ -37,17 +37,37 @@ class IncrementalSafetensorsWriter:
     This completely eliminates the need to pre-calculate all tensor shapes and offsets
     before writing.
 
+    Three write modes:
+
+    ``write(name, tensor)``
+        Single tensor. One key, one tensor, queued asynchronously.
+
+    ``write_batch(batch)``
+        List of ``(name, tensor)`` tuples. Offsets reserved atomically for the
+        entire batch under one lock acquisition; workers submitted in parallel.
+        Matches the per-batch yield format of ``async_stream``.
+
+    ``write_dict(state_dict)``
+        Standard PyTorch state dict ``{name: tensor}``. Converts to ordered
+        batch and delegates to ``write_batch``.
+
     Usage:
-        # Reserve 1MB for the header (usually plenty)
-        writer = IncrementalSafetensorsWriter("output.safetensors", max_header_bytes=1024*1024)
-        
+        # Single tensor
+        writer = IncrementalSafetensorsWriter("output.safetensors")
         with writer:
             for key in loader.keys():
                 tensor = process(loader.get_tensor(key))
                 writer.write(key, tensor)
-                
-                # Immediate explicit memory release
                 del tensor
+
+        # Streaming batches from async_stream
+        with IncrementalSafetensorsWriter("output.safetensors") as writer:
+            for batch in loader.async_stream(keys, batch_size=16):
+                writer.write_batch(batch)
+
+        # Full state dict
+        with IncrementalSafetensorsWriter("output.safetensors") as writer:
+            writer.write_dict(model.state_dict())
     """
 
     @logging_utils.log_debug
@@ -145,6 +165,8 @@ class IncrementalSafetensorsWriter:
     def _worker_write(self, offset_absolute, tensor):
         try:
             torch = _ensure_torch()
+            # CPU move + contiguous enforcement happens here, off the calling thread
+            tensor = tensor.cpu().contiguous()
             byte_data = tensor.view(torch.uint8).numpy().tobytes()
 
             with self._lock:
@@ -153,6 +175,68 @@ class IncrementalSafetensorsWriter:
         finally:
             self._semaphore.release()
             del tensor
+
+    @logging_utils.log_debug
+    def write_batch(self, batch: list):
+        """
+        Atomically reserve offsets for a batch of tensors and queue all writes asynchronously.
+
+        Offset reservation for the entire batch is performed under a single lock acquisition,
+        guaranteeing contiguous, correctly ordered data regions in the output file.
+        Workers are submitted after the lock is released to avoid blocking other threads.
+
+        Args:
+            batch: List of (name, tensor) tuples. Matches the per-batch yield format of
+                   ``UnifiedSafetensorsLoader.async_stream``.
+        """
+        if self._file is None:
+            raise RuntimeError("Must be used within a context manager.")
+
+        # Extract metadata only — no data movement in calling thread.
+        # shape and dtype are available on any tensor regardless of device.
+        prepared = []
+        for name, tensor in batch:
+            st_dtype = torch_to_st_dtype(tensor.dtype)
+            shape = list(tensor.shape)
+            num_elements = math.prod(shape) if shape else 1
+            byte_size = num_elements * get_dtype_size(st_dtype)
+            prepared.append((name, st_dtype, shape, byte_size, tensor))
+
+        # Atomically reserve offsets for all tensors in this batch
+        absolute_offsets = []
+        with self._lock:
+            for name, st_dtype, shape, byte_size, _ in prepared:
+                if name in self._manifest:
+                    raise ValueError(f"Tensor '{name}' has already been written.")
+                offset_start = self._current_data_offset
+                offset_end = offset_start + byte_size
+                self._manifest[name] = {
+                    "dtype": st_dtype,
+                    "shape": shape,
+                    "data_offsets": [offset_start, offset_end],
+                }
+                self._current_data_offset += byte_size
+                absolute_offsets.append(8 + self.max_header_bytes + offset_start)
+
+        # Submit workers outside the lock; cpu()+contiguous() happens inside each worker
+        for absolute_offset, (_, _st_dtype, _shape, _byte_size, tensor) in zip(absolute_offsets, prepared):
+            self._semaphore.acquire()
+            future = self._executor.submit(self._worker_write, absolute_offset, tensor)
+            self._futures.append(future)
+
+    @logging_utils.log_debug
+    def write_dict(self, state_dict: dict):
+        """
+        Write all tensors from a state dict as a single batch operation.
+
+        Converts the state dict to an ordered list of (name, tensor) pairs and
+        delegates to ``write_batch`` for atomic offset reservation and async writes.
+
+        Args:
+            state_dict: Dict mapping tensor names to PyTorch tensors,
+                        e.g. the output of ``model.state_dict()``.
+        """
+        self.write_batch(list(state_dict.items()))
 
     @logging_utils.log_debug
     def write(self, name: str, tensor):
@@ -169,8 +253,7 @@ class IncrementalSafetensorsWriter:
         if name in self._manifest:
             raise ValueError(f"Tensor '{name}' has already been written.")
 
-        # Enforce CPU and contiguous
-        tensor = tensor.cpu().contiguous()
+        # Extract metadata only — no data movement in calling thread
         st_dtype = torch_to_st_dtype(tensor.dtype)
         shape = list(tensor.shape)
         
