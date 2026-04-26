@@ -12,6 +12,7 @@ import json
 import struct
 import threading
 import math
+import ctypes
 from concurrent.futures import ThreadPoolExecutor
 
 from . import logging_utils
@@ -168,11 +169,16 @@ class IncrementalSafetensorsWriter:
             torch = _ensure_torch()
             # CPU move + contiguous enforcement happens here, off the calling thread
             tensor = tensor.cpu().contiguous()
-            byte_data = tensor.view(torch.uint8).numpy().tobytes()
+
+            # Zero-copy write: build a ctypes array directly over the tensor's raw memory.
+            # Mirrors the loader's readinto() trick — no intermediate Python bytes object,
+            # no GIL-holding memcpy. OS copies straight from tensor memory to kernel buffer.
+            byte_size = tensor.numel() * tensor.element_size()
+            c_uint8_array = (ctypes.c_uint8 * byte_size).from_address(tensor.data_ptr())
 
             with self._lock:
                 self._file.seek(offset_absolute)
-                self._file.write(byte_data)
+                self._file.write(c_uint8_array)
         finally:
             del tensor
 
