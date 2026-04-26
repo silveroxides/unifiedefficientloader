@@ -163,6 +163,7 @@ class IncrementalSafetensorsWriter:
         )
 
     def _worker_write(self, offset_absolute, tensor):
+        """Write a single tensor at a pre-computed absolute offset. Does not touch semaphore."""
         try:
             torch = _ensure_torch()
             # CPU move + contiguous enforcement happens here, off the calling thread
@@ -173,8 +174,15 @@ class IncrementalSafetensorsWriter:
                 self._file.seek(offset_absolute)
                 self._file.write(byte_data)
         finally:
-            self._semaphore.release()
             del tensor
+
+    def _batch_worker(self, items):
+        """Fan out writes for a batch of (offset, tensor) pairs, then release semaphore once."""
+        try:
+            for offset_absolute, tensor in items:
+                self._worker_write(offset_absolute, tensor)
+        finally:
+            self._semaphore.release()
 
     @logging_utils.log_debug
     def write_batch(self, batch: list):
@@ -218,11 +226,12 @@ class IncrementalSafetensorsWriter:
                 self._current_data_offset += byte_size
                 absolute_offsets.append(8 + self.max_header_bytes + offset_start)
 
-        # Submit workers outside the lock; cpu()+contiguous() happens inside each worker
-        for absolute_offset, (_, _st_dtype, _shape, _byte_size, tensor) in zip(absolute_offsets, prepared):
-            self._semaphore.acquire()
-            future = self._executor.submit(self._worker_write, absolute_offset, tensor)
-            self._futures.append(future)
+        # Single semaphore acquire for the whole batch — no per-tensor blocking in caller.
+        # _batch_worker fans out writes internally and releases the semaphore when done.
+        items = [(offset, entry[4]) for offset, entry in zip(absolute_offsets, prepared)]
+        self._semaphore.acquire()
+        future = self._executor.submit(self._batch_worker, items)
+        self._futures.append(future)
 
     @logging_utils.log_debug
     def write_dict(self, state_dict: dict):
@@ -277,7 +286,5 @@ class IncrementalSafetensorsWriter:
         absolute_offset = 8 + self.max_header_bytes + offset_start
 
         self._semaphore.acquire()
-        future = self._executor.submit(
-            self._worker_write, absolute_offset, tensor
-        )
+        future = self._executor.submit(self._batch_worker, [(absolute_offset, tensor)])
         self._futures.append(future)
