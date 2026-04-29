@@ -1,67 +1,57 @@
-import os
-import ctypes
-import platform
-from pathlib import Path
-import logging
+"""
+Redirect: unifiedefficientloader.uel.control → comfy_aimdo.control
 
-lib = None
+Wraps init()/init_devices() to:
+1. Patch module-level 'lib' references in comfy_aimdo submodules
+2. Auto-initialize the default CUDA device for backward compatibility
+   (old uel.dll didn't require explicit init_device before hostbuf usage)
+"""
+import sys
+import comfy_aimdo.control as _ctrl
 
-def init():
-    global lib
+_original_init = _ctrl.init
+_original_init_devices = _ctrl.init_devices
+_original_init_device = _ctrl.init_device
 
-    if lib is not None:
-        return True
 
+def _patch_lib_refs():
+    """Propagate control.lib to submodules that captured it at import time."""
+    for mod_name in ("comfy_aimdo.model_mmap", "comfy_aimdo.host_buffer", "comfy_aimdo.model_vbar"):
+        mod = sys.modules.get(mod_name)
+        if mod is not None and hasattr(mod, "lib"):
+            mod.lib = _ctrl.lib
+
+
+def _auto_init_device():
+    """Auto-initialize default GPU device for backward compat with old uel behavior."""
+    if _ctrl.devctxs:
+        return  # Already initialized
     try:
-        base_path = Path(__file__).parent.resolve()
-        system = platform.system()
-        if system == "Windows":
-            lib = ctypes.CDLL(str(base_path / "uel.dll"))
-        elif system == "Linux":
-            lib = ctypes.CDLL(str(base_path / "uel.so"), mode=258)
-        else:
-            logging.info(f"unifiedefficientloader-uel os not supported {system}")
-            logging.info(f"NOTE: unifiedefficientloader-uel is currently only support for Windows and Linux")
-            return False
-    except Exception as e:
-        logging.info(f"unifiedefficientloader-uel failed to load: {e}")
-        logging.info(f"NOTE: unifiedefficientloader-uel is currently only support for Nvidia GPUs")
-        return False
-
-    lib.get_total_vram_usage.argtypes = []
-    lib.get_total_vram_usage.restype = ctypes.c_uint64
-
-    lib.init.argtypes = [ctypes.c_int]
-    lib.init.restype = ctypes.c_bool
-
-    return True
-
-def init_device(device_id: int):
-    if lib is None:
-        return False
-
-    return lib.init(device_id)
-
-def deinit():
-    global lib
-    if lib is not None:
-        lib.cleanup()
-    lib = None
+        import torch
+        if torch.cuda.is_available():
+            device_id = torch.cuda.current_device()
+            _original_init_device(device_id)
+            _patch_lib_refs()
+    except Exception:
+        pass
 
 
-def set_log_none(): lib.set_log_level_none()
-def set_log_critical(): lib.set_log_level_critical()
-def set_log_error(): lib.set_log_level_error()
-def set_log_warning(): lib.set_log_level_warning()
-def set_log_info(): lib.set_log_level_info()
-def set_log_debug(): lib.set_log_level_debug()
-def set_log_verbose(): lib.set_log_level_verbose()
-def set_log_vverbose(): lib.set_log_level_vverbose()
+def _patched_init(*args, **kwargs):
+    result = _original_init(*args, **kwargs)
+    if result and _ctrl.lib is not None:
+        _patch_lib_refs()
+        _auto_init_device()
+    return result
 
-def analyze():
-    if lib is None:
-        return
-    lib.uel_analyze()
 
-def get_total_vram_usage():
-    return 0 if lib is None else lib.get_total_vram_usage()
+def _patched_init_devices(*args, **kwargs):
+    result = _original_init_devices(*args, **kwargs)
+    if result and _ctrl.lib is not None:
+        _patch_lib_refs()
+    return result
+
+
+_ctrl.init = _patched_init
+_ctrl.init_devices = _patched_init_devices
+
+sys.modules[__name__] = _ctrl

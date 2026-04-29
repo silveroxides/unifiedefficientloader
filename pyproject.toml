@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unifiedefficientloader"
-version = "0.4.3"
+version = "0.4.4"
 description = "A unified interface for memory efficient per tensor loading of safetensors files as raw bytes from offset, handling CPU/GPU pinned transfers, and converting between tensors and dicts."
 readme = "README.md"
 authors = [
@@ -19,7 +19,7 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
 ]
 requires-python = ">=3.9"
-dependencies = []
+dependencies = ["comfy-aimdo==0.3.0"]
 
 [project.optional-dependencies]
 torch = ["torch"]
