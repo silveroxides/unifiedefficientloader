@@ -30,6 +30,14 @@ assert recovered == config
 
 Raises `ValueError` if tensor is not 1D.
 
+### `torch_to_st_dtype(dtype) -> str`
+
+Maps a PyTorch dtype to a safetensors dtype string (e.g., `torch.float16` -> `"F16"`).
+
+### `st_to_torch_dtype(dtype_str: str) -> torch.dtype`
+
+Maps a safetensors dtype string to a PyTorch dtype (e.g., `"F16"` -> `torch.float16`).
+
 ### Round-trip example
 
 ```python

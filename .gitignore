@@ -6,12 +6,6 @@ __pycache__/
 # C extensions
 *.so
 
-# UEL compiled native library artifacts (built via setup.py build_ext)
-unifiedefficientloader/uel/*.dll
-unifiedefficientloader/uel/*.so
-unifiedefficientloader/uel/*.lib
-unifiedefficientloader/uel/*.exp
-
 # Distribution / packaging
 .Python
 build/

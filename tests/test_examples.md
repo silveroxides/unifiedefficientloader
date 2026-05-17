@@ -89,6 +89,19 @@ python tests/benchmark_standard.py dummy.safetensors
 ```
 *   **Performance:** Higher RAM usage, slower startup (full preload), faster transfer loop (data already in RAM).
 
+### 3. DataLoader Throughput Comparison
+To compare the pure loading throughput of standard PyTorch dataloaders vs the `UnifiedDataLoader`, run the included benchmark script. It generates a synthetic dataset in memory to eliminate disk I/O bottlenecks and test pure transfer pipeline speeds.
+
+```bash
+python tests/benchmark_dataloader.py --size 10000 --batch-size 64 --workers 4
+```
+
+This tests:
+1. Standard PyTorch DataLoader (unpinned)
+2. Standard PyTorch DataLoader (pinned)
+3. UnifiedDataLoader (CPU Threaded)
+4. UnifiedDataLoader (Direct GPU Pipeline)
+
 ## Argument Reference Summary
 
 | Argument | Description | Default |

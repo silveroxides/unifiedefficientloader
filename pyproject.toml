@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unifiedefficientloader"
-version = "0.3.2"
+version = "0.4.5"
 description = "A unified interface for memory efficient per tensor loading of safetensors files as raw bytes from offset, handling CPU/GPU pinned transfers, and converting between tensors and dicts."
 readme = "README.md"
 authors = [
   { name="silveroxides" }
 ]
-license = "MIT"
+license = { file = "LICENSE" }
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -19,7 +19,7 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
 ]
 requires-python = ">=3.9"
-dependencies = []
+dependencies = ["comfy-aimdo==0.3.0"]
 
 [project.optional-dependencies]
 torch = ["torch"]
@@ -41,3 +41,31 @@ filterwarnings = [
 where = ["."]
 include = ["unifiedefficientloader*"]
 exclude = ["reference"]
+
+[tool.ruff]
+line-length = 320
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.ruff.lint.isort]
+split-on-trailing-comma = false
+
+[tool.ruff.format]
+skip-magic-trailing-comma = true
+
+[tool.isort]
+line_length = 64
+profile = "black"
+force_grid_wrap = 2
+multi_line_output = 3
+include_trailing_comma = true
+
+[tool.yapf]
+based_on_style = "pep8"
+column_limit = 128
+split_all_comma_separated_values = false
+split_before_named_assigns = false
+dedent_closing_brackets = true
+join_multiple_lines = false
+indent_width = 4

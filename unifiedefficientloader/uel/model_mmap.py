@@ -1,19 +1,21 @@
+"""
+ModelMMAP wrapper that accesses comfy_aimdo.control.lib dynamically.
+
+Unlike comfy_aimdo.model_mmap which captures `lib = control.lib` at import time
+(breaking if init() hasn't been called yet or lib is temporarily None),
+this wrapper always accesses control.lib at call time.
+"""
 import ctypes
 import os
 
-from . import control
+import comfy_aimdo.control as _ctrl
+
+_argtypes_set = False
 
 
-def _get_lib():
-    """Return the loaded ctypes library, calling init() if not yet done."""
-    if control.lib is None:
-        control.init()
-    return control.lib
-
-
-def _setup_argtypes():
-    lib = control.lib
-    if lib is None:
+def _setup_argtypes(lib):
+    global _argtypes_set
+    if _argtypes_set:
         return
     lib.model_mmap_allocate.argtypes = [ctypes.c_char_p]
     lib.model_mmap_allocate.restype = ctypes.c_void_p
@@ -25,15 +27,16 @@ def _setup_argtypes():
     lib.model_mmap_bounce.restype = ctypes.c_bool
 
     lib.model_mmap_deallocate.argtypes = [ctypes.c_void_p]
+    _argtypes_set = True
 
 
 class ModelMMAP:
     def __init__(self, filepath):
-        lib = _get_lib()
+        lib = _ctrl.lib
         if lib is None:
-            raise RuntimeError("unifiedefficientloader-uel is not initialized")
+            raise RuntimeError("comfy-aimdo is not initialized")
 
-        _setup_argtypes()
+        _setup_argtypes(lib)
 
         normalized_path = os.fspath(filepath)
         if isinstance(normalized_path, bytes):
@@ -48,12 +51,12 @@ class ModelMMAP:
             raise RuntimeError(f"ModelMMAP allocation failed for {filepath}")
 
     def get(self):
-        return control.lib.model_mmap_get(self.state)
+        return _ctrl.lib.model_mmap_get(self.state)
 
     def bounce(self):
-        return bool(control.lib.model_mmap_bounce(self.state))
+        return bool(_ctrl.lib.model_mmap_bounce(self.state))
 
     def __del__(self):
         state = getattr(self, "state", None)
-        if state and control.lib is not None:
-            control.lib.model_mmap_deallocate(state)
+        if state and _ctrl.lib is not None:
+            _ctrl.lib.model_mmap_deallocate(state)

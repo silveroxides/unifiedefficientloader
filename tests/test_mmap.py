@@ -2,7 +2,7 @@
 Tests for use_mmap=True path in UnifiedSafetensorsLoader.
 
 Covers:
-- MMAP init success / graceful fallback when uel.dll not available
+- MMAP init success / graceful fallback when comfy-aimdo not available
 - get_tensor returns correct values via MMAP zero-copy path
 - async_stream yields correct values via MMAP parallel page-fault path
 - load_all returns correct dict via MMAP path
@@ -43,7 +43,7 @@ def sample_file():
 
 
 def _uel_available() -> bool:
-    """Return True if the compiled uel native library loaded successfully."""
+    """Return True if the comfy-aimdo native library loaded successfully."""
     try:
         from unifiedefficientloader.uel import control
 
@@ -54,18 +54,18 @@ def _uel_available() -> bool:
 
 
 uel_required = pytest.mark.skipif(
-    not _uel_available(), reason="uel native library (uel.dll/uel.so) not available"
+    not _uel_available(), reason="comfy-aimdo native library (aimdo.dll/aimdo.so) not available"
 )
 
 
 # ---------------------------------------------------------------------------
-# Graceful fallback when uel not compiled
+# Graceful fallback when comfy-aimdo not available
 # ---------------------------------------------------------------------------
 
 
 def test_mmap_fallback_when_unavailable(sample_file, monkeypatch):
     """
-    If uel native lib fails to load, use_mmap should silently fall back
+    If comfy-aimdo native lib fails to load, use_mmap should silently fall back
     to standard IO without raising.
     """
     path, tensors = sample_file

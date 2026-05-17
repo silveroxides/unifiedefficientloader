@@ -55,3 +55,72 @@ def tensor_to_dict(tensor_data) -> dict:
     data_dict = json.loads(json_str)
     logging_utils.debug(f"tensor_to_dict: deserialized tensor of shape {tensor_data.shape} to dict with keys: {list(data_dict.keys())}")
     return data_dict
+
+def torch_to_st_dtype(dtype) -> str:
+    """Map torch dtype to safetensors dtype string."""
+    torch = _ensure_torch()
+    mapping = {
+        torch.float64: "F64",
+        torch.float32: "F32",
+        torch.float16: "F16",
+        torch.bfloat16: "BF16",
+        torch.int64: "I64",
+        torch.int32: "I32",
+        torch.int16: "I16",
+        torch.int8: "I8",
+        torch.uint8: "U8",
+        torch.bool: "BOOL",
+        torch.complex64: "C64",
+    }
+    if hasattr(torch, "float8_e5m2"):
+        mapping[torch.float8_e5m2] = "F8_E5M2"
+    if hasattr(torch, "float8_e4m3fn"):
+        mapping[torch.float8_e4m3fn] = "F8_E4M3"
+    if hasattr(torch, "uint64"):
+        mapping[torch.uint64] = "U64"
+    if hasattr(torch, "uint32"):
+        mapping[torch.uint32] = "U32"
+    if hasattr(torch, "uint16"):
+        mapping[torch.uint16] = "U16"
+
+    if dtype in mapping:
+        return mapping[dtype]
+    raise ValueError(f"Unsupported torch dtype: {dtype}")
+
+def st_to_torch_dtype(dtype_str: str):
+    """Map safetensors dtype string to torch dtype."""
+    torch = _ensure_torch()
+    dtype_map = {
+        "F64": torch.float64,
+        "F32": torch.float32,
+        "F16": torch.float16,
+        "BF16": torch.bfloat16,
+        "I64": torch.int64,
+        "I32": torch.int32,
+        "I16": torch.int16,
+        "I8": torch.int8,
+        "U8": torch.uint8,
+        "BOOL": torch.bool,
+        "C64": torch.complex64,
+        "F8_E5M2": getattr(torch, "float8_e5m2", None),
+        "F8_E4M3": getattr(torch, "float8_e4m3fn", None),
+        "U64": getattr(torch, "uint64", None),
+        "U32": getattr(torch, "uint32", None),
+        "U16": getattr(torch, "uint16", None),
+    }
+
+    dtype = dtype_map.get(dtype_str)
+    if dtype is None:
+        raise ValueError(f"Unsupported or unavailable dtype: {dtype_str}")
+    return dtype
+
+def get_dtype_size(st_dtype: str) -> int:
+    """Get the byte size of a safetensors dtype string."""
+    sizes = {
+        "F64": 8, "F32": 4, "F16": 2, "BF16": 2,
+        "I64": 8, "I32": 4, "I16": 2, "I8": 1, "U8": 1,
+        "U64": 8, "U32": 4, "U16": 2,
+        "BOOL": 1, "C64": 8,
+        "F8_E5M2": 1, "F8_E4M3": 1,
+    }
+    return sizes[st_dtype]
