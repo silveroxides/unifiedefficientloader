@@ -102,7 +102,9 @@ class UnifiedSafetensorsLoader:
                 import ctypes
 
                 if control.lib is None:
-                    control.init()
+                    init_result = control.init()
+                    if not init_result:
+                        raise RuntimeError("control.init() returned False — comfy-aimdo library may not be available")
 
                 self._mmap = ModelMMAP(self.filename)
                 self._mmap_size = os.path.getsize(self.filename)
@@ -114,6 +116,7 @@ class UnifiedSafetensorsLoader:
                 logging_utils.warning(
                     f"Failed to initialize MMAP: {e}. Falling back to standard IO."
                 )
+                logging_utils.debug(f"MMAP initialization exception details: {type(e).__name__}: {e}")
                 self.use_mmap = False
                 self._mmap = None
                 self._mmap_view = None
