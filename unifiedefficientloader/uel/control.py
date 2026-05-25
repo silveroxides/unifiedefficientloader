@@ -16,7 +16,7 @@ _original_init_device = _ctrl.init_device
 
 def _patch_lib_refs():
     """Propagate control.lib to submodules that captured it at import time."""
-    for mod_name in ("comfy_aimdo.model_mmap", "comfy_aimdo.host_buffer", "comfy_aimdo.model_vbar"):
+    for mod_name in ("comfy_aimdo.model_mmap", "comfy_aimdo.host_buffer", "comfy_aimdo.model_vbar", "comfy_aimdo.vram_buffer"):
         mod = sys.modules.get(mod_name)
         if mod is not None and hasattr(mod, "lib"):
             mod.lib = _ctrl.lib
