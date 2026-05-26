@@ -45,6 +45,18 @@ except ImportError:
     pass
 
 
+_GGUF_MAGIC = b"GGUF"  # 0x47 0x47 0x55 0x46
+
+
+def _is_gguf_file(filename: str) -> bool:
+    """Return True if the file starts with the GGUF magic bytes."""
+    try:
+        with open(filename, "rb") as f:
+            return f.read(4) == _GGUF_MAGIC
+    except Exception:
+        return False
+
+
 class UnifiedSafetensorsLoader:
     """Unified safetensors loader supporting both preload and streaming modes.
 
@@ -62,7 +74,24 @@ class UnifiedSafetensorsLoader:
                 tensor = loader.get_tensor(key)
                 # ... process tensor ...
                 loader.mark_processed(key)  # Frees memory in low_memory mode
+
+    Note:
+        If a GGUF file is passed, a warning is emitted and the call is
+        transparently redirected to UnifiedGGUFLoader with the same arguments.
     """
+
+    def __new__(cls, filename: str, *args, **kwargs):
+        if _is_gguf_file(filename):
+            import warnings as _warnings
+            _warnings.warn(
+                f"'{filename}' is a GGUF file. "
+                "Redirecting to UnifiedGGUFLoader automatically. "
+                "Consider using UnifiedGGUFLoader directly to suppress this warning.",
+                stacklevel=2,
+            )
+            from .gguf_loader import UnifiedGGUFLoader
+            return UnifiedGGUFLoader(filename, *args, **kwargs)
+        return super().__new__(cls)
 
     @logging_utils.log_debug
     def __init__(
@@ -73,6 +102,10 @@ class UnifiedSafetensorsLoader:
         use_mmap: bool = False,
     ):
         """Initialize the loader.
+
+        Note: if __new__ redirected to UnifiedGGUFLoader this __init__ is never
+        reached (Python only calls __init__ when the returned object is an
+        instance of the constructing class).
 
         Args:
             filename: Path to safetensors file

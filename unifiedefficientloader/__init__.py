@@ -21,6 +21,7 @@ def check_dependencies(*packages):
 check_dependencies("torch")
 
 from .memory_efficient_loader import UnifiedSafetensorsLoader, MemoryEfficientSafeOpen
+from .gguf_loader import UnifiedGGUFLoader
 from .incremental_writer import IncrementalSafetensorsWriter
 from .unified_data_loader import UnifiedDataLoader
 from .tensor_utils import dict_to_tensor, tensor_to_dict, torch_to_st_dtype, st_to_torch_dtype
@@ -47,6 +48,7 @@ __all__ = [
     "IncrementalSafetensorsWriter",
     "UnifiedDataLoader",
     "MemoryEfficientSafeOpen",
+    "UnifiedGGUFLoader",
     "dict_to_tensor",
     "tensor_to_dict",
     "torch_to_st_dtype",

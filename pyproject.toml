@@ -25,7 +25,8 @@ dependencies = ["comfy-aimdo>=0.4.5"]
 torch = ["torch"]
 safetensors = ["safetensors"]
 tqdm = ["tqdm"]
-all = ["torch", "safetensors", "tqdm"]
+gguf = ["gguf"]
+all = ["torch", "safetensors", "tqdm", "gguf"]
 
 [tool.pytest.ini_options]
 log_cli = true
