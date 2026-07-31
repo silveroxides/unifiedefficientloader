@@ -16,7 +16,7 @@ import ctypes
 from concurrent.futures import ThreadPoolExecutor
 
 from . import logging_utils
-from .tensor_utils import torch_to_st_dtype, get_dtype_size
+from .tensor_utils import get_dtype_size, torch_shape_to_st_shape, torch_to_st_dtype
 logger = logging_utils.get_logger(__name__)
 
 def _ensure_torch():
@@ -211,8 +211,9 @@ class IncrementalSafetensorsWriter:
         prepared = []
         for name, tensor in batch:
             st_dtype = torch_to_st_dtype(tensor.dtype)
-            shape = list(tensor.shape)
-            num_elements = math.prod(shape) if shape else 1
+            tensor_shape = list(tensor.shape)
+            shape = torch_shape_to_st_shape(tensor.shape, st_dtype)
+            num_elements = math.prod(tensor_shape) if tensor_shape else 1
             byte_size = num_elements * get_dtype_size(st_dtype)
             prepared.append((name, st_dtype, shape, byte_size, tensor))
 
@@ -270,9 +271,10 @@ class IncrementalSafetensorsWriter:
 
         # Extract metadata only — no data movement in calling thread
         st_dtype = torch_to_st_dtype(tensor.dtype)
-        shape = list(tensor.shape)
+        tensor_shape = list(tensor.shape)
+        shape = torch_shape_to_st_shape(tensor.shape, st_dtype)
         
-        num_elements = math.prod(shape) if shape else 1
+        num_elements = math.prod(tensor_shape) if tensor_shape else 1
         byte_size = num_elements * get_dtype_size(st_dtype)
         
         # Record manifest entry
