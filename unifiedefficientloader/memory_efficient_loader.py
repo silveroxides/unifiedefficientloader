@@ -11,7 +11,7 @@ import struct
 from typing import Dict, Optional, Tuple
 
 from . import logging_utils
-from .tensor_utils import st_to_torch_dtype
+from .tensor_utils import st_shape_to_torch_shape, st_to_torch_dtype
 
 logger = logging_utils.get_logger(__name__)
 
@@ -212,7 +212,8 @@ class UnifiedSafetensorsLoader:
         if self.low_memory:
             if key not in self._header:
                 raise KeyError(f"Tensor '{key}' not found in file")
-            return tuple(self._header[key]["shape"])
+            metadata = self._header[key]
+            return st_shape_to_torch_shape(metadata["shape"], metadata["dtype"])
         else:
             return tuple(self._tensors[key].shape)
 
@@ -265,9 +266,8 @@ class UnifiedSafetensorsLoader:
                         "ignore", message="The given buffer is not writable"
                     )
                     dtype = st_to_torch_dtype(metadata["dtype"])
-                    tensor = torch.frombuffer(tensor_view, dtype=dtype).view(
-                        metadata["shape"]
-                    )
+                    shape = st_shape_to_torch_shape(metadata["shape"], metadata["dtype"])
+                    tensor = torch.frombuffer(tensor_view, dtype=dtype).view(shape)
                     storage = tensor.untyped_storage()
                     setattr(storage, "_uel_mmap_ref", self._mmap)
                     return tensor
@@ -311,7 +311,7 @@ class UnifiedSafetensorsLoader:
         """Deserialize raw bytes into a torch tensor."""
         torch = _ensure_torch()
         dtype_str = metadata["dtype"]
-        shape = metadata["shape"]
+        shape = st_shape_to_torch_shape(metadata["shape"], dtype_str)
         dtype = st_to_torch_dtype(dtype_str)
 
         if tensor_bytes is None:
