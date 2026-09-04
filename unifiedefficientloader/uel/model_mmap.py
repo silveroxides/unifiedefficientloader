@@ -23,6 +23,9 @@ def _setup_argtypes(lib):
     lib.model_mmap_get.argtypes = [ctypes.c_void_p]
     lib.model_mmap_get.restype = ctypes.c_void_p
 
+    lib.model_mmap_get_file_handle.argtypes = [ctypes.c_void_p]
+    lib.model_mmap_get_file_handle.restype = ctypes.c_uint64
+
     lib.model_mmap_bounce.argtypes = [ctypes.c_void_p]
     lib.model_mmap_bounce.restype = ctypes.c_bool
 
@@ -52,6 +55,9 @@ class ModelMMAP:
 
     def get(self):
         return _ctrl.lib.model_mmap_get(self.state)
+
+    def get_file_handle(self):
+        return int(_ctrl.lib.model_mmap_get_file_handle(self.state))
 
     def bounce(self):
         return bool(_ctrl.lib.model_mmap_bounce(self.state))

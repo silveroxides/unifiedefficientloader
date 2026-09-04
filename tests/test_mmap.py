@@ -107,6 +107,29 @@ def test_mmap_get_tensor_values(sample_file):
 
 
 @uel_required
+def test_mmap_exposes_file_handle(sample_file):
+    """The compatibility wrapper exposes comfy-aimdo's file handle API."""
+    path, _ = sample_file
+
+    with UnifiedSafetensorsLoader(path, low_memory=True, use_mmap=True) as loader:
+        file_handle = loader._mmap.get_file_handle()
+
+    assert isinstance(file_handle, int)
+    assert file_handle > 0
+
+
+def test_control_init_accepts_aimdo_051_options():
+    """The control wrapper forwards comfy-aimdo 0.5.1 init options."""
+    from unifiedefficientloader.uel import control
+
+    assert control.init(
+        implementation=None,
+        simple_vram_headroom=None,
+        nvml_pressure=False,
+    )
+
+
+@uel_required
 def test_mmap_get_tensor_mmap_ref_attached(sample_file):
     """
     Tensors returned via MMAP path have _uel_mmap_ref attached to storage,
